@@ -1,13 +1,14 @@
 /* ================================================================
-   Audit Capture — Placement engine v1.0
+   Audit Capture — Placement engine v1.1
    ================================================================
    All the image placement logic:
    - config (fractions, no absolute measurements)
    - decode image dims
    - scan slide, detect header/footer zones
    - compute grid, contain-fit
-   - insert image via paste (CDP) with fallback
-   - name & position
+   - insert image via paste (CDP) with clipboard handled by the
+     content script (taskpane clipboard is blocked by permissions)
+   - name & position the new shape
    ================================================================ */
 
 /* ----------------------------------------------------------------
@@ -28,7 +29,7 @@ const CFG = {
 };
 
 /* ----------------------------------------------------------------
-   Shared state (defined in taskpane.js, referenced here)
+   Shared state (defined here, mirrored in taskpane.js)
 ---------------------------------------------------------------- */
 const placementState = {
   imagesPlaced: 0,
@@ -144,38 +145,70 @@ function fitContain(slot, imgW, imgH) {
 }
 
 /* ================================================================
-   Insert image via paste from the extension (CDP).
-   The Add-in:
-     1. Copies the base64 to the system clipboard
-     2. Asks the extension to fire Ctrl+V on the PPT tab via CDP
-     3. Waits for the shape to appear
+   insertViaPaste
+   ────────────────────────────────────────────────────────────────
+   The taskpane CANNOT write to the clipboard (Permissions-Policy
+   blocks it on GitHub Pages). So:
+     1. We hand the base64 to the content script via postMessage
+     2. The content script writes the clipboard
+     3. The content script replies AUDIT_CLIPBOARD_READY
+     4. We ask the extension to fire Ctrl+V via CDP
+     5. We wait until the new image appears on the slide
 ================================================================ */
 async function insertViaPaste(base64) {
-  /* 1. Copy image to clipboard */
+  const dataUrl = 'data:image/png;base64,' + base64;
+
+  /* 1. Ask the content script to write the clipboard */
   try {
-    const blob = await (await fetch('data:image/png;base64,' + base64)).blob();
-    await navigator.clipboard.write([new ClipboardItem({ 'image/png': blob })]);
-    log('📋 Image copiée dans le presse-papier');
+    window.parent.postMessage({
+      type: 'AUDIT_WRITE_CLIPBOARD',
+      dataUrl,
+      ts: Date.now(),
+    }, '*');
+    log('→ Envoi de l\'image au content script pour presse-papier');
   } catch (e) {
-    log('⚠️ Clipboard write failed: ' + e.message, 'err');
+    log('⚠️ postMessage failed: ' + e.message, 'err');
     return false;
   }
 
-  /* 2. Ask the extension to paste */
-  try {
-    /* The taskpane is embedded in an iframe hosted on GitHub Pages.
-       The extension listens on chrome.runtime.onMessage, so we need
-       to route through window.parent.postMessage — the content script
-       is not in this iframe. So we send via chrome.runtime directly
-       if available (Office.js doesn't expose chrome.runtime, so we
-       fall back to window.parent.postMessage and the extension's
-       content script must relay).
+  /* 2. Wait for confirmation */
+  const ready = await new Promise((resolve) => {
+    let done = false;
+    const onMsg = (e) => {
+      if (done) return;
+      if (!e.data || typeof e.data.type !== 'string') return;
+      if (e.data.type === 'AUDIT_CLIPBOARD_READY') {
+        done = true;
+        window.removeEventListener('message', onMsg);
+        resolve(true);
+      }
+      if (e.data.type === 'AUDIT_CLIPBOARD_ERROR') {
+        done = true;
+        window.removeEventListener('message', onMsg);
+        log('⚠️ Clipboard error: ' + e.data.error, 'err');
+        resolve(false);
+      }
+    };
+    window.addEventListener('message', onMsg);
+    /* Safety timeout */
+    setTimeout(() => {
+      if (done) return;
+      done = true;
+      window.removeEventListener('message', onMsg);
+      resolve(false);
+    }, 3000);
+  });
 
-       HOWEVER: the extension injects a content script into the PPT tab.
-       That content script CAN listen to window messages from the
-       taskpane iframe, then relay them via chrome.runtime.sendMessage.
-       That relay is registered in content.js (see the extension).
-    */
+  if (!ready) {
+    log('⚠️ Presse-papier non disponible — collage annulé', 'err');
+    return false;
+  }
+
+  /* Small delay so the clipboard write is definitely settled */
+  await new Promise((r) => setTimeout(r, 150));
+
+  /* 3. Ask the extension to fire Ctrl+V via CDP */
+  try {
     window.parent.postMessage({
       type: 'AUDIT_PASTE_REQUEST',
       ts: Date.now(),
@@ -186,7 +219,7 @@ async function insertViaPaste(base64) {
     return false;
   }
 
-  /* 3. Wait for the shape to appear */
+  /* 4. Wait for the shape to appear (up to 3.5 s) */
   const start = Date.now();
   while (Date.now() - start < 3500) {
     await new Promise((r) => setTimeout(r, 300));
@@ -197,7 +230,7 @@ async function insertViaPaste(base64) {
 }
 
 /* ================================================================
-   Did addImage/paste actually insert a shape?
+   Did the insertion actually happen?
 ================================================================ */
 async function didInsertWork() {
   try {
