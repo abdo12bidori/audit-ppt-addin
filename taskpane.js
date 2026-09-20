@@ -1,7 +1,8 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v2.0
-   Uses setSelectedDataAsync (works everywhere)
-   Then positions the image with Office.js
+   Audit Capture — PowerPoint Add-in v2.1
+   - Uses setSelectedDataAsync (works everywhere)
+   - Positions the image with Office.js
+   - FIXED: replaces non-existent slide.duplicate() with slides.add()
 ================================================================ */
 
 const LAYOUT = {
@@ -56,6 +57,12 @@ Office.onReady((info) => {
     log('Wrong host', 'err');
     return;
   }
+
+  /* Check for the requirement set we need for slides.add() */
+  if (!Office.context.requirements.isSetSupported('PowerPointApi', '1.2')) {
+    log('⚠️ PowerPointApi 1.2 non supporté — slides.add indisponible', 'err');
+  }
+
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
   log('Add-in démarré');
 
@@ -97,21 +104,25 @@ function connectWebSocket() {
     ws.onclose = () => {
       setTimeout(connectWebSocket, 3000);
     };
+    ws.onerror = () => {};   /* silent — WS is optional */
   } catch (e) {}
 }
 
 /* ================================================================
    Core — place an image
-   1. Check if slide is full → duplicate if needed
-   2. Insert image via setSelectedDataAsync
-   3. Position the inserted image
+   1. Look at the LAST slide
+   2. If it already has perSlide images → add a new slide (same layout)
+   3. Insert image via setSelectedDataAsync
+   4. Position the inserted image in the correct grid slot
 ================================================================ */
 async function placeImage(dataUrl) {
   try {
     setStatus('⏳ Placement…');
 
-    /* 1. Check the current slide state via Office.js */
     await PowerPoint.run(async (context) => {
+      /* ----------------------------------------------------------
+         1. Load slides
+      ---------------------------------------------------------- */
       const slides = context.presentation.slides;
       slides.load('items');
       await context.sync();
@@ -130,29 +141,39 @@ async function placeImage(dataUrl) {
 
       log(`Slide ${slides.items.length} : ${imagesOnTarget.length} image(s)`);
 
-      /* 2. If slide full → duplicate */
+      /* ----------------------------------------------------------
+         2. If slide is full → add a NEW slide with the same layout
+            ⚠️ slide.duplicate() does NOT exist in the JS API.
+               Use slides.add({ layoutId }) instead.
+      ---------------------------------------------------------- */
       if (imagesOnTarget.length >= LAYOUT.perSlide) {
-        log('Slide pleine → duplication');
-        targetSlide.duplicate();
+        log('Slide pleine → ajout d\'une nouvelle slide');
+
+        /* Remember the current slide's layout so the new slide
+           inherits the same look (background, master, placeholders). */
+        targetSlide.layout.load('id,name');
         await context.sync();
 
+        const layoutId = targetSlide.layout.id;
+
+        /* Create the new slide */
+        slides.add({ layoutId });
+        await context.sync();
+
+        /* Refresh the list and target the newly created last slide */
         slides.load('items');
         await context.sync();
-        targetSlide = slides.items[slides.items.length - 1];
 
+        targetSlide = slides.items[slides.items.length - 1];
         targetSlide.shapes.load('items');
         await context.sync();
-        const dupImages = targetSlide.shapes.items.filter(
-          (s) => s.type === PowerPoint.ShapeType.image
-        );
-        for (const img of dupImages) {
-          img.delete();
-        }
-        await context.sync();
+
         log(`Nouvelle slide créée : ${slides.items.length}`);
       }
 
-      /* 3. Get slide dimensions */
+      /* ----------------------------------------------------------
+         3. Get slide dimensions
+      ---------------------------------------------------------- */
       const pageSetup = context.presentation.pageSetup;
       pageSetup.load(['slideWidth', 'slideHeight']);
       await context.sync();
@@ -160,15 +181,20 @@ async function placeImage(dataUrl) {
       const slideW = pageSetup.slideWidth;
       const slideH = pageSetup.slideHeight;
 
-      /* 4. Re-count images on target slide */
+      /* ----------------------------------------------------------
+         4. Re-count images on target slide to pick the right slot
+      ---------------------------------------------------------- */
       targetSlide.shapes.load('items');
       await context.sync();
+
       const currentImages = targetSlide.shapes.items.filter(
         (s) => s.type === PowerPoint.ShapeType.image
       );
       const slotIndex = currentImages.length;
 
-      /* 5. Calculate position */
+      /* ----------------------------------------------------------
+         5. Compute position (grid of `perSlide` columns)
+      ---------------------------------------------------------- */
       const margin = LAYOUT.margin * 72;
       const gap = LAYOUT.gap * 72;
       const topOffset = LAYOUT.topOffset * 72;
@@ -182,8 +208,9 @@ async function placeImage(dataUrl) {
 
       log(`Position : left=${left.toFixed(0)} top=${topOffset.toFixed(0)} w=${cellW.toFixed(0)} h=${cellH.toFixed(0)}`);
 
-      /* 6. Insert the image using setSelectedDataAsync */
-      /* Strip the "data:image/png;base64," prefix */
+      /* ----------------------------------------------------------
+         6. Insert the image via setSelectedDataAsync
+      ---------------------------------------------------------- */
       const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
 
       await new Promise((resolve, reject) => {
@@ -202,8 +229,9 @@ async function placeImage(dataUrl) {
 
       log('Image insérée via setSelectedDataAsync');
 
-      /* 7. Now position the inserted image */
-      /* Give PowerPoint a moment to add the shape */
+      /* ----------------------------------------------------------
+         7. Position the newly-inserted image
+      ---------------------------------------------------------- */
       await new Promise((r) => setTimeout(r, 200));
 
       await PowerPoint.run(async (context2) => {
@@ -224,10 +252,9 @@ async function placeImage(dataUrl) {
           return;
         }
 
-        /* The newest image is the last one */
+        /* Assume the newest image is the last one in the collection */
         const img = imgs[imgs.length - 1];
 
-        /* Position it */
         img.left = left;
         img.top = topOffset;
         img.width = cellW;
