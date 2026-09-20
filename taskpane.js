@@ -1,15 +1,15 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in
-   Places screenshot images: 2 per slide, side by side
-   Auto-duplicates the slide when the current one is full
+   Audit Capture — PowerPoint Add-in v2.0
+   Uses setSelectedDataAsync (works everywhere)
+   Then positions the image with Office.js
 ================================================================ */
 
 const LAYOUT = {
-  perSlide: 2,           /* 2 images per slide */
-  margin: 0.5,           /* inches */
-  gap: 0.3,              /* inches between images */
-  topOffset: 1.5,        /* inches from top (below title) */
-  aspect: 4 / 3,         /* image aspect ratio */
+  perSlide: 2,
+  margin: 0.5,
+  gap: 0.3,
+  topOffset: 1.5,
+  aspect: 4 / 3,
 };
 
 const state = {
@@ -65,26 +65,19 @@ Office.onReady((info) => {
 
 /* ================================================================
    Listen for images
-   Supports:
-   1. window.postMessage (from the extension)
-   2. Direct function call: window.__auditPlaceImage(dataUrl)
-   3. WebSocket relay (if the extension uses one)
 ================================================================ */
 function listenForImages() {
-  /* Method 1: postMessage */
   window.addEventListener('message', (e) => {
     if (!e.data || e.data.type !== 'AUDIT_ADD_IMAGE') return;
     log('Image reçue (postMessage)');
     placeImage(e.data.dataUrl);
   });
 
-  /* Method 2: direct function call */
   window.__auditPlaceImage = (dataUrl) => {
     log('Image reçue (direct)');
     placeImage(dataUrl);
   };
 
-  /* Method 3: WebSocket (optional) */
   connectWebSocket();
 }
 
@@ -99,29 +92,27 @@ function connectWebSocket() {
           log('Image reçue (WebSocket)');
           placeImage(msg.dataUrl);
         }
-      } catch (err) {
-        log('JSON parse error', 'err');
-      }
+      } catch (err) {}
     };
     ws.onclose = () => {
-      log('WebSocket fermé, retry 3s');
       setTimeout(connectWebSocket, 3000);
     };
-  } catch (e) {
-    /* WebSocket not required */
-  }
+  } catch (e) {}
 }
 
 /* ================================================================
-   Core — place an image on the appropriate slide
+   Core — place an image
+   1. Check if slide is full → duplicate if needed
+   2. Insert image via setSelectedDataAsync
+   3. Position the inserted image
 ================================================================ */
 async function placeImage(dataUrl) {
   try {
     setStatus('⏳ Placement…');
 
+    /* 1. Check the current slide state via Office.js */
     await PowerPoint.run(async (context) => {
-      const presentation = context.presentation;
-      const slides = presentation.slides;
+      const slides = context.presentation.slides;
       slides.load('items');
       await context.sync();
 
@@ -129,7 +120,6 @@ async function placeImage(dataUrl) {
         throw new Error('No slides in presentation');
       }
 
-      /* Find target slide */
       let targetSlide = slides.items[slides.items.length - 1];
       targetSlide.shapes.load('items');
       await context.sync();
@@ -140,7 +130,7 @@ async function placeImage(dataUrl) {
 
       log(`Slide ${slides.items.length} : ${imagesOnTarget.length} image(s)`);
 
-      /* If slide is full → duplicate it */
+      /* 2. If slide full → duplicate */
       if (imagesOnTarget.length >= LAYOUT.perSlide) {
         log('Slide pleine → duplication');
         targetSlide.duplicate();
@@ -150,7 +140,6 @@ async function placeImage(dataUrl) {
         await context.sync();
         targetSlide = slides.items[slides.items.length - 1];
 
-        /* Remove all images from the duplicate */
         targetSlide.shapes.load('items');
         await context.sync();
         const dupImages = targetSlide.shapes.items.filter(
@@ -163,7 +152,15 @@ async function placeImage(dataUrl) {
         log(`Nouvelle slide créée : ${slides.items.length}`);
       }
 
-      /* Re-count images on target slide */
+      /* 3. Get slide dimensions */
+      const pageSetup = context.presentation.pageSetup;
+      pageSetup.load(['slideWidth', 'slideHeight']);
+      await context.sync();
+
+      const slideW = pageSetup.slideWidth;
+      const slideH = pageSetup.slideHeight;
+
+      /* 4. Re-count images on target slide */
       targetSlide.shapes.load('items');
       await context.sync();
       const currentImages = targetSlide.shapes.items.filter(
@@ -171,14 +168,7 @@ async function placeImage(dataUrl) {
       );
       const slotIndex = currentImages.length;
 
-      /* Calculate position */
-      const pageSetup = presentation.pageSetup;
-      pageSetup.load(['slideWidth', 'slideHeight']);
-      await context.sync();
-
-      const slideW = pageSetup.slideWidth;
-      const slideH = pageSetup.slideHeight;
-
+      /* 5. Calculate position */
       const margin = LAYOUT.margin * 72;
       const gap = LAYOUT.gap * 72;
       const topOffset = LAYOUT.topOffset * 72;
@@ -190,17 +180,64 @@ async function placeImage(dataUrl) {
       const col = slotIndex % cols;
       const left = margin + col * (cellW + gap);
 
-      /* Insert image */
-      const shape = targetSlide.shapes.addImage(dataUrl);
-      shape.left = left;
-      shape.top = topOffset;
-      shape.width = cellW;
-      shape.height = cellH;
+      log(`Position : left=${left.toFixed(0)} top=${topOffset.toFixed(0)} w=${cellW.toFixed(0)} h=${cellH.toFixed(0)}`);
 
-      await context.sync();
+      /* 6. Insert the image using setSelectedDataAsync */
+      /* Strip the "data:image/png;base64," prefix */
+      const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+
+      await new Promise((resolve, reject) => {
+        Office.context.document.setSelectedDataAsync(
+          base64,
+          { coercionType: Office.CoercionType.Image },
+          (result) => {
+            if (result.status === Office.AsyncResultStatus.Succeeded) {
+              resolve();
+            } else {
+              reject(new Error('setSelectedDataAsync failed: ' + (result.error?.message || 'unknown')));
+            }
+          }
+        );
+      });
+
+      log('Image insérée via setSelectedDataAsync');
+
+      /* 7. Now position the inserted image */
+      /* Give PowerPoint a moment to add the shape */
+      await new Promise((r) => setTimeout(r, 200));
+
+      await PowerPoint.run(async (context2) => {
+        const slides2 = context2.presentation.slides;
+        slides2.load('items');
+        await context2.sync();
+
+        const lastSlide = slides2.items[slides2.items.length - 1];
+        lastSlide.shapes.load('items');
+        await context2.sync();
+
+        const imgs = lastSlide.shapes.items.filter(
+          (s) => s.type === PowerPoint.ShapeType.image
+        );
+
+        if (imgs.length === 0) {
+          log('⚠️ No image found after insertion', 'err');
+          return;
+        }
+
+        /* The newest image is the last one */
+        const img = imgs[imgs.length - 1];
+
+        /* Position it */
+        img.left = left;
+        img.top = topOffset;
+        img.width = cellW;
+        img.height = cellH;
+
+        await context2.sync();
+        log(`✅ Image positionnée — slide ${slides2.items.length}, slot ${slotIndex + 1}`, 'ok');
+      });
 
       state.imagesPlaced++;
-      log(`✅ Image placée — slide ${slides.items.length}, slot ${slotIndex + 1}`, 'ok');
       setStatus(`✅ Image placée (slot ${slotIndex + 1})`, 'ok');
     });
 
@@ -234,9 +271,7 @@ async function refreshStats() {
 
       updateStats(slides.items.length, imgs);
     });
-  } catch (e) {
-    /* ignore */
-  }
+  } catch (e) {}
 }
 
 /* ================================================================
