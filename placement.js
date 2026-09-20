@@ -1,19 +1,14 @@
 /* ================================================================
-   Audit Capture — Placement engine v1.1
+   Audit Capture — Placement engine v1.3
    ================================================================
-   All the image placement logic:
-   - config (fractions, no absolute measurements)
-   - decode image dims
-   - scan slide, detect header/footer zones
-   - compute grid, contain-fit
-   - insert image via paste (CDP) with clipboard handled by the
-     content script (taskpane clipboard is blocked by permissions)
-   - name & position the new shape
+   All the image placement logic.
+   insertViaPaste now:
+     1. Sends the base64 to the content script (writes clipboard)
+     2. Waits a fixed 500 ms (no reply needed)
+     3. Sends AUDIT_PASTE_REQUEST (background fires Ctrl+V via CDP)
+     4. Polls PowerPoint until the new shape appears
    ================================================================ */
 
-/* ----------------------------------------------------------------
-   Config — all fractions of the slide size
----------------------------------------------------------------- */
 const CFG = {
   MAX_PER_ROW: 3,
   MARGIN_FRAC: 0.04,
@@ -28,9 +23,6 @@ const CFG = {
   CLOSED_FLAG: 'audit-closed',
 };
 
-/* ----------------------------------------------------------------
-   Shared state (defined here, mirrored in taskpane.js)
----------------------------------------------------------------- */
 const placementState = {
   imagesPlaced: 0,
   masterWarningShown: false,
@@ -58,7 +50,7 @@ function auditImageIndex(name) {
 }
 
 /* ================================================================
-   Scan slide — collect audit images, detect header/footer
+   Scan slide
 ================================================================ */
 function scanSlide(slide, slideW, slideH) {
   const shapes = slide.shapes.items || [];
@@ -71,10 +63,7 @@ function scanSlide(slide, slideW, slideH) {
     if (!s || s.type === undefined) continue;
     const name = s.name || '';
 
-    if (name.startsWith(CFG.CLOSED_FLAG)) {
-      closed = true;
-      continue;
-    }
+    if (name.startsWith(CFG.CLOSED_FLAG)) { closed = true; continue; }
 
     if (name.startsWith(CFG.NAMESPACE)) {
       auditImages.push(s);
@@ -88,7 +77,6 @@ function scanSlide(slide, slideW, slideH) {
     else if (bottom > slideH * CFG.FOOTER_BOT_FRAC) footer.push({ top });
   }
 
-  /* Sort by numeric part of name → stable order regardless of z-order */
   auditImages.sort((a, b) => auditImageIndex(a.name) - auditImageIndex(b.name));
 
   const headerBottom = header.length
@@ -103,7 +91,7 @@ function scanSlide(slide, slideW, slideH) {
 }
 
 /* ================================================================
-   Compute grid — dynamic N-way split
+   Compute grid
 ================================================================ */
 function computeGrid(scan, N, slideW, slideH) {
   const margin = slideW * CFG.MARGIN_FRAC;
@@ -130,7 +118,7 @@ function computeGrid(scan, N, slideW, slideH) {
 }
 
 /* ================================================================
-   fitContain — adapt with NO distortion, NO quality loss
+   fitContain
 ================================================================ */
 function fitContain(slot, imgW, imgH) {
   const scale = Math.min(slot.w / imgW, slot.h / imgH);
@@ -145,15 +133,7 @@ function fitContain(slot, imgW, imgH) {
 }
 
 /* ================================================================
-   insertViaPaste
-   ────────────────────────────────────────────────────────────────
-   The taskpane CANNOT write to the clipboard (Permissions-Policy
-   blocks it on GitHub Pages). So:
-     1. We hand the base64 to the content script via postMessage
-     2. The content script writes the clipboard
-     3. The content script replies AUDIT_CLIPBOARD_READY
-     4. We ask the extension to fire Ctrl+V via CDP
-     5. We wait until the new image appears on the slide
+   insertViaPaste — content script writes clipboard, then CDP pastes
 ================================================================ */
 async function insertViaPaste(base64) {
   const dataUrl = 'data:image/png;base64,' + base64;
@@ -165,49 +145,16 @@ async function insertViaPaste(base64) {
       dataUrl,
       ts: Date.now(),
     }, '*');
-    log('→ Envoi de l\'image au content script pour presse-papier');
+    log('→ Envoi de l\'image au content script (presse-papier)');
   } catch (e) {
     log('⚠️ postMessage failed: ' + e.message, 'err');
     return false;
   }
 
-  /* 2. Wait for confirmation */
-  const ready = await new Promise((resolve) => {
-    let done = false;
-    const onMsg = (e) => {
-      if (done) return;
-      if (!e.data || typeof e.data.type !== 'string') return;
-      if (e.data.type === 'AUDIT_CLIPBOARD_READY') {
-        done = true;
-        window.removeEventListener('message', onMsg);
-        resolve(true);
-      }
-      if (e.data.type === 'AUDIT_CLIPBOARD_ERROR') {
-        done = true;
-        window.removeEventListener('message', onMsg);
-        log('⚠️ Clipboard error: ' + e.data.error, 'err');
-        resolve(false);
-      }
-    };
-    window.addEventListener('message', onMsg);
-    /* Safety timeout */
-    setTimeout(() => {
-      if (done) return;
-      done = true;
-      window.removeEventListener('message', onMsg);
-      resolve(false);
-    }, 3000);
-  });
+  /* 2. Fixed delay — no reply needed */
+  await new Promise((r) => setTimeout(r, 500));
 
-  if (!ready) {
-    log('⚠️ Presse-papier non disponible — collage annulé', 'err');
-    return false;
-  }
-
-  /* Small delay so the clipboard write is definitely settled */
-  await new Promise((r) => setTimeout(r, 150));
-
-  /* 3. Ask the extension to fire Ctrl+V via CDP */
+  /* 3. Ask the background to fire Ctrl+V via CDP */
   try {
     window.parent.postMessage({
       type: 'AUDIT_PASTE_REQUEST',
@@ -219,12 +166,15 @@ async function insertViaPaste(base64) {
     return false;
   }
 
-  /* 4. Wait for the shape to appear (up to 3.5 s) */
+  /* 4. Poll until the new shape appears (up to 4 s) */
   const start = Date.now();
-  while (Date.now() - start < 3500) {
+  while (Date.now() - start < 4000) {
     await new Promise((r) => setTimeout(r, 300));
     const found = await didInsertWork();
-    if (found) return true;
+    if (found) {
+      log('✅ Collage détecté');
+      return true;
+    }
   }
   return false;
 }
@@ -286,7 +236,6 @@ async function runPlacement(dataUrl, mode) {
     target.shapes.load('items');
     await context.sync();
 
-    /* Master warning (once) */
     if (!placementState.masterWarningShown && slides.items.length === 1) {
       if (target.shapes.items.length <= 2) {
         log('⚠️ Le masque ne contient pas d\'en-tête.', 'err');
@@ -294,11 +243,9 @@ async function runPlacement(dataUrl, mode) {
       }
     }
 
-    /* Scan */
     let scan = scanSlide(target, slideW, slideH);
     log(`Slide ${slides.items.length} — ${scan.auditImages.length} image(s), header→${scan.headerBottom.toFixed(0)}, footer→${scan.footerTop.toFixed(0)}, closed=${scan.closed}`);
 
-    /* New slide when full or closed */
     const needsNewSlide = scan.auditImages.length >= CFG.MAX_PER_ROW || scan.closed;
     if (needsNewSlide) {
       const reason = scan.closed ? 'clôturée (END)' : `pleine (${scan.auditImages.length}/${CFG.MAX_PER_ROW})`;
@@ -325,7 +272,6 @@ async function runPlacement(dataUrl, mode) {
     slotForNew = slots[totalAfter - 1];
     log(`Grille : ${totalAfter} slot(s), largeur ${slots[0].w.toFixed(0)}`);
 
-    /* Reposition all existing audit images (overwrites manual edits) */
     for (let i = 0; i < scan.auditImages.length; i++) {
       const img = scan.auditImages[i];
       const slot = slots[i];
@@ -343,17 +289,14 @@ async function runPlacement(dataUrl, mode) {
     await context.sync();
   });
 
-  /* Insert the new image via paste (CDP) */
   log('→ Insertion via collage (CDP)');
   const inserted = await insertViaPaste(base64);
   if (!inserted) {
     throw new Error('Insertion par collage échouée');
   }
 
-  /* Wait for shape */
   await new Promise((r) => setTimeout(r, 300));
 
-  /* Final pass: name & position */
   await PowerPoint.run(async (context) => {
     const slides = context.presentation.slides;
     slides.load('items');
@@ -387,7 +330,6 @@ async function runPlacement(dataUrl, mode) {
     await context.sync();
     log(`✅ Image ${index} placée — slide ${slides.items.length}, slot ${totalAfter}/${CFG.MAX_PER_ROW}`, 'ok');
 
-    /* END → mark slide closed */
     if (mode === 'end') {
       try {
         const marker = lastSlide.shapes.addTextBox(' ');
