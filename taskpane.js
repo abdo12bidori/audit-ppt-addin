@@ -1,20 +1,15 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v3.1
+   Audit Capture — PowerPoint Add-in v3.2
    ================================================================
-   What this does:
-   - Receives an image via postMessage from the Chrome extension
-   - Detects the free zone on the last slide (below header, above footer)
-   - Places the image so that it ADAPTS to the slot:
-       • Keeps aspect ratio (no distortion)
-       • No quality loss (original bytes preserved, Office.js just
-         scales the displayed shape — the image inside the file
-         stays full resolution)
-       • Centered in its slot → looks natural
-   - Images share the slide side by side:
-       1 = 100%   2 = 50% each   3 = 33% each   →  4th = new slide
-   - mode:'end' → closes the current slide. The next image will
-     start a fresh slide automatically, even if the row isn't full.
-   - Uses only fractions of the slide size (no hardcoded pixels)
+   Changes vs v3.1:
+   - Uses slide.shapes.addImage(base64) instead of setSelectedDataAsync
+     → no more "cannot write to selection" errors
+   - Falls back to setSelectedDataAsync + setSelectedSlides if needed
+   - Always re-reads existing audit images by NAME (audit-img-N)
+     → user's manual drags/resizes are overwritten on the next insert
+     → the auto-grid always wins
+   - Keeps queue + dedupe + watchdog
+   - Keeps mode: 'normal' | 'end'
    ================================================================ */
 
 /* ----------------------------------------------------------------
@@ -31,7 +26,7 @@ const CFG = {
   FALLBACK_HEADER_FRAC: 0.15,
   FALLBACK_FOOTER_FRAC: 0.90,
   NAMESPACE: 'audit-img-',
-  CLOSED_FLAG: 'audit-closed',   // shape-name marker for a closed slide
+  CLOSED_FLAG: 'audit-closed',
 };
 
 const state = {
@@ -85,14 +80,14 @@ Office.onReady((info) => {
   }
 
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
-  log('Add-in v3.1 démarré');
+  log('Add-in v3.2 démarré');
 
   listenForImages();
   setTimeout(refreshStats, 500);
 });
 
 /* ================================================================
-   Listen for images — dedupe + serialize + mode
+   Listen for images — dedupe + serialize
 ================================================================ */
 let __lastDataUrl = null;
 let __lastDataUrlTs = 0;
@@ -124,26 +119,6 @@ function listenForImages() {
     log(`Image reçue (direct, mode=${mode || 'normal'})`);
     enqueue(dataUrl, mode || 'normal', 'direct');
   };
-
-  /* WebSocket disabled — uncomment if you run a local relay */
-  // connectWebSocket();
-}
-
-function connectWebSocket() {
-  try {
-    const ws = new WebSocket('ws://127.0.0.1:8765/ppt');
-    ws.onopen = () => log('WebSocket connecté');
-    ws.onmessage = (e) => {
-      try {
-        const msg = JSON.parse(e.data);
-        if (msg.type === 'AUDIT_ADD_IMAGE') {
-          placeImage(msg.dataUrl, msg.mode || 'normal');
-        }
-      } catch (err) {}
-    };
-    ws.onclose = () => setTimeout(connectWebSocket, 3000);
-    ws.onerror = () => {};
-  } catch (e) {}
 }
 
 /* ================================================================
@@ -170,7 +145,7 @@ async function placeImage(dataUrl, mode) {
 }
 
 /* ================================================================
-   Decode image dimensions (off-DOM)
+   Decode image dimensions
 ================================================================ */
 function decodeImageDims(dataUrl) {
   return new Promise((resolve, reject) => {
@@ -182,7 +157,16 @@ function decodeImageDims(dataUrl) {
 }
 
 /* ================================================================
-   scanSlide — inspect the slide (dynamic, no hardcoded pixels)
+   Extract N from "audit-img-N" → number (or Infinity if invalid)
+================================================================ */
+function auditImageIndex(name) {
+  if (!name || !name.startsWith(CFG.NAMESPACE)) return Infinity;
+  const n = parseInt(name.slice(CFG.NAMESPACE.length), 10);
+  return Number.isFinite(n) ? n : Infinity;
+}
+
+/* ================================================================
+   scanSlide — inspect slide & collect audit images by NAME order
 ================================================================ */
 function scanSlide(slide, slideW, slideH) {
   const shapes = slide.shapes.items || [];
@@ -212,6 +196,10 @@ function scanSlide(slide, slideW, slideH) {
     else if (bottom > slideH * CFG.FOOTER_BOT_FRAC) footer.push({ top });
   }
 
+  /* ⭐ Sort by the numeric part of the name so order is stable
+     even if the user manually reordered shapes */
+  auditImages.sort((a, b) => auditImageIndex(a.name) - auditImageIndex(b.name));
+
   const headerBottom = header.length
     ? Math.max(...header.map((h) => h.bottom))
     : slideH * CFG.FALLBACK_HEADER_FRAC;
@@ -224,8 +212,7 @@ function scanSlide(slide, slideW, slideH) {
 }
 
 /* ================================================================
-   computeGrid — dynamic slot layout for N images
-   All sizes are fractions of the slide → no hardcoded measurements
+   computeGrid — dynamic N-way split, all fractions
 ================================================================ */
 function computeGrid(scan, N, slideW, slideH) {
   const margin = slideW * CFG.MARGIN_FRAC;
@@ -252,12 +239,7 @@ function computeGrid(scan, N, slideW, slideH) {
 }
 
 /* ================================================================
-   fitContain — adapt image to slot with NO distortion
-   - Keeps aspect ratio
-   - Uses min scale → image fully visible inside slot
-   - Centers the result (looks natural)
-   - Office.js only changes the DISPLAY size; original bytes stay
-     intact inside the PPTX → no quality loss
+   fitContain — adapt with NO distortion, NO quality loss
 ================================================================ */
 function fitContain(slot, imgW, imgH) {
   const scale = Math.min(slot.w / imgW, slot.h / imgH);
@@ -275,7 +257,6 @@ function fitContain(slot, imgW, imgH) {
    Core — runPlacement
 ================================================================ */
 async function runPlacement(dataUrl, mode) {
-  /* 1. Decode image dims */
   let dims;
   try {
     dims = await decodeImageDims(dataUrl);
@@ -285,15 +266,18 @@ async function runPlacement(dataUrl, mode) {
   }
   log(`Image : ${dims.w}×${dims.h}, mode=${mode}`);
 
+  const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+  let targetSlideId = null;
+  let totalAfter = 0;
+  let slotForNew = null;
+
   await PowerPoint.run(async (context) => {
-    /* 2. Slide dimensions */
     const pageSetup = context.presentation.pageSetup;
     pageSetup.load(['slideWidth', 'slideHeight']);
     await context.sync();
     const slideW = pageSetup.slideWidth;
     const slideH = pageSetup.slideHeight;
 
-    /* 3. Get last slide */
     const slides = context.presentation.slides;
     slides.load('items');
     await context.sync();
@@ -303,26 +287,23 @@ async function runPlacement(dataUrl, mode) {
     target.shapes.load('items');
     await context.sync();
 
-    /* 4. Master warning (once) */
+    /* Master warning */
     if (!state.masterWarningShown && slides.items.length === 1) {
       if (target.shapes.items.length <= 2) {
-        log('⚠️ Le masque ne contient pas d\'en-tête. Les nouvelles diapositives seront vides.', 'err');
+        log('⚠️ Le masque ne contient pas d\'en-tête.', 'err');
         state.masterWarningShown = true;
       }
     }
 
-    /* 5. Scan */
+    /* Scan */
     let scan = scanSlide(target, slideW, slideH);
     log(`Slide ${slides.items.length} — ${scan.auditImages.length} image(s), header→${scan.headerBottom.toFixed(0)}, footer→${scan.footerTop.toFixed(0)}, closed=${scan.closed}`);
 
-    /* 6. Decide if we need a new slide */
-    const isFull = scan.auditImages.length >= CFG.MAX_PER_ROW;
-    const isClosed = scan.closed === true;
-    const needsNewSlide = isFull || isClosed;
-
+    /* New slide if full or closed */
+    const needsNewSlide = scan.auditImages.length >= CFG.MAX_PER_ROW || scan.closed;
     if (needsNewSlide) {
-      const reason = isClosed ? 'slide clôturée (END)' : `slide pleine (${scan.auditImages.length}/${CFG.MAX_PER_ROW})`;
-      log(`${reason} → nouvelle slide`);
+      const reason = scan.closed ? 'clôturée (END)' : `pleine (${scan.auditImages.length}/${CFG.MAX_PER_ROW})`;
+      log(`Slide ${reason} → nouvelle slide`);
 
       target.layout.load('id');
       await context.sync();
@@ -336,22 +317,20 @@ async function runPlacement(dataUrl, mode) {
       target = slides.items[slides.items.length - 1];
       target.shapes.load('items');
       await context.sync();
-
       scan = scanSlide(target, slideW, slideH);
-      log(`Nouvelle slide : ${slides.items.length} (${scan.auditImages.length} image(s) déjà)`);
+      log(`Nouvelle slide : ${slides.items.length}`);
     }
 
-    /* 7. Compute grid for existing + new */
-    const totalAfter = scan.auditImages.length + 1;
+    targetSlideId = target.id;
+    totalAfter = scan.auditImages.length + 1;
     const slots = computeGrid(scan, totalAfter, slideW, slideH);
+    slotForNew = slots[totalAfter - 1];
     log(`Grille : ${totalAfter} slot(s), largeur ${slots[0].w.toFixed(0)}`);
 
-    /* 8. Reposition existing images to slots 0..N-2, contain-fit */
+    /* ⭐ Reposition ALL existing images (respects NAMES, overwrites manual edits) */
     for (let i = 0; i < scan.auditImages.length; i++) {
       const img = scan.auditImages[i];
       const slot = slots[i];
-      /* Recover the ratio from the shape's current width/height.
-         Since we always placed them contain-fit, this stays correct. */
       const curW = img.width || 1;
       const curH = img.height || 1;
       const ratio = curH / curW;
@@ -365,84 +344,131 @@ async function runPlacement(dataUrl, mode) {
     }
     await context.sync();
 
-    /* 9. Insert the new image */
-    const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    await new Promise((resolve, reject) => {
-      Office.context.document.setSelectedDataAsync(
-        base64,
-        { coercionType: Office.CoercionType.Image },
-        (result) => {
-          if (result.status === Office.AsyncResultStatus.Succeeded) resolve();
-          else reject(new Error('setSelectedDataAsync failed: ' + (result.error?.message || 'unknown')));
-        }
-      );
+    /* ⭐ Insert the new image with slide.shapes.addImage(base64)
+       — no dependency on the user's selection. */
+    let inserted = null;
+    try {
+      inserted = target.shapes.addImage(base64);
+      await context.sync();
+      log('Image insérée via addImage');
+    } catch (e) {
+      log('⚠️ addImage indisponible, fallback setSelectedDataAsync : ' + e.message, 'err');
+      inserted = null;
+    }
+  });
+
+  /* Fallback: if addImage failed, use setSelectedDataAsync on the selected slide */
+  if (!(await didInsertWork(targetSlideId))) {
+    log('→ Fallback setSelectedDataAsync');
+    await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+
+      const target = slides.items[slides.items.length - 1];
+
+      /* Force selection to the target slide */
+      try {
+        context.presentation.setSelectedSlides([target.id]);
+        await context.sync();
+      } catch (e) {
+        log('⚠️ setSelectedSlides failed: ' + e.message, 'err');
+      }
+
+      await new Promise((resolve, reject) => {
+        Office.context.document.setSelectedDataAsync(
+          base64,
+          { coercionType: Office.CoercionType.Image },
+          (result) => {
+            if (result.status === Office.AsyncResultStatus.Succeeded) resolve();
+            else reject(new Error('setSelectedDataAsync failed: ' + (result.error?.message || 'unknown')));
+          }
+        );
+      });
     });
-    log('Image insérée');
+  }
 
-    /* 10. Find, tag and position the new image */
-    await new Promise((r) => setTimeout(r, 250));
+  /* Wait for shape to appear */
+  await new Promise((r) => setTimeout(r, 300));
 
-    await PowerPoint.run(async (context2) => {
-      const slides2 = context2.presentation.slides;
-      slides2.load('items');
-      await context2.sync();
+  /* Final pass: name & position the new shape */
+  await PowerPoint.run(async (context) => {
+    const slides = context.presentation.slides;
+    slides.load('items');
+    await context.sync();
+    const lastSlide = slides.items[slides.items.length - 1];
+    lastSlide.shapes.load('items');
+    await context.sync();
 
-      const lastSlide = slides2.items[slides2.items.length - 1];
-      lastSlide.shapes.load('items');
-      await context2.sync();
+    /* Candidates = images without our namespace */
+    const candidates = lastSlide.shapes.items.filter(
+      (s) =>
+        s.type === PowerPoint.ShapeType.image &&
+        !(s.name || '').startsWith(CFG.NAMESPACE) &&
+        !(s.name || '').startsWith(CFG.CLOSED_FLAG)
+    );
 
-      /* Find the newest = image with NO audit- prefix */
-      const candidates = lastSlide.shapes.items.filter(
+    if (candidates.length === 0) {
+      log('⚠️ Nouvelle image introuvable après insertion', 'err');
+      return;
+    }
+
+    const newImg = candidates[candidates.length - 1];
+    const index = totalAfter;
+    try { newImg.name = `${CFG.NAMESPACE}${index}`; } catch (e) {}
+
+    const fitted = fitContain(slotForNew, dims.w, dims.h);
+    newImg.left = fitted.x;
+    newImg.top = fitted.y;
+    newImg.width = fitted.w;
+    newImg.height = fitted.h;
+
+    await context.sync();
+    log(`✅ Image ${index} placée — slide ${slides.items.length}, slot ${totalAfter}/${CFG.MAX_PER_ROW}`, 'ok');
+
+    /* END → mark slide closed */
+    if (mode === 'end') {
+      try {
+        const marker = lastSlide.shapes.addTextBox(' ');
+        marker.name = `${CFG.CLOSED_FLAG}-${Date.now()}`;
+        marker.left = -100;
+        marker.top = -100;
+        marker.width = 1;
+        marker.height = 1;
+        await context.sync();
+        log('🔒 Slide clôturée (END)');
+      } catch (e) {
+        log('⚠️ Impossible de clôturer : ' + e.message, 'err');
+      }
+    }
+  });
+
+  state.imagesPlaced++;
+  setStatus(`✅ Image placée (${totalAfter}/${CFG.MAX_PER_ROW})${mode === 'end' ? ' — clôturée' : ''}`, 'ok');
+}
+
+/* ================================================================
+   Helper: did addImage actually insert a shape?
+================================================================ */
+async function didInsertWork(expectedSlideId) {
+  try {
+    return await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+      const last = slides.items[slides.items.length - 1];
+      last.shapes.load('items');
+      await context.sync();
+      return last.shapes.items.some(
         (s) =>
           s.type === PowerPoint.ShapeType.image &&
           !(s.name || '').startsWith(CFG.NAMESPACE) &&
           !(s.name || '').startsWith(CFG.CLOSED_FLAG)
       );
-
-      if (candidates.length === 0) {
-        log('⚠️ Nouvelle image introuvable', 'err');
-        return;
-      }
-
-      const newImg = candidates[candidates.length - 1];
-
-      /* Tag it */
-      const index = scan.auditImages.length + 1;
-      try { newImg.name = `${CFG.NAMESPACE}${index}`; } catch (e) {}
-
-      /* Position: contain-fit in its slot */
-      const slot = slots[totalAfter - 1];
-      const fitted = fitContain(slot, dims.w, dims.h);
-
-      newImg.left = fitted.x;
-      newImg.top = fitted.y;
-      newImg.width = fitted.w;
-      newImg.height = fitted.h;
-
-      await context2.sync();
-      log(`✅ Image ${index} placée — slide ${slides2.items.length}, slot ${totalAfter}/${CFG.MAX_PER_ROW}`, 'ok');
-
-      /* 11. If END → mark the slide as closed */
-      if (mode === 'end') {
-        try {
-          /* Add an invisible marker shape with the closed flag in its name */
-          const marker = lastSlide.shapes.addTextBox(' ');
-          marker.name = `${CFG.CLOSED_FLAG}-${Date.now()}`;
-          marker.left = -100;
-          marker.top = -100;
-          marker.width = 1;
-          marker.height = 1;
-          await context2.sync();
-          log('🔒 Slide clôturée (END) — la prochaine image ira sur une nouvelle slide');
-        } catch (e) {
-          log('⚠️ Impossible de marquer la slide comme clôturée : ' + e.message, 'err');
-        }
-      }
     });
-
-    state.imagesPlaced++;
-    setStatus(`✅ Image placée (${totalAfter}/${CFG.MAX_PER_ROW})${mode === 'end' ? ' — slide clôturée' : ''}`, 'ok');
-  });
+  } catch (e) {
+    return false;
+  }
 }
 
 /* ================================================================
