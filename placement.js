@@ -6,19 +6,17 @@
    - decode image dims
    - scan slide, detect header/footer zones
    - compute grid, contain-fit
-   - insert image via paste (CDP) with retry-after-focus
+   - insert image via paste (CDP) with retry after focus
    - name & position
 
-   v1.4: Chrome refuses `navigator.clipboard.write` when the document
-         isn't focused. The taskpane runs in an iframe, so writing to
-         the clipboard from there usually fails on the first try. The
-         extension's CDP click (which focuses the PPT tab) happens
-         AFTER the first write. So we now:
-           1. Try to write the clipboard (likely fails silently)
-           2. Ask the extension to fire CDP paste (focuses PPT tab)
-           3. RETRY the clipboard write — this time the tab is focused
-           4. Ask for a second CDP paste
-           5. Poll for the shape
+   v1.4 changes:
+     • Removed pageSetup.load() — replaced with fixed 960×540 to
+       avoid the "slideWidth is not loaded" error that was killing
+       every placement.
+     • insertViaPaste now does TWO rounds of write+paste, because
+       Chrome refuses navigator.clipboard.write when the taskpane
+       document isn't focused. Round 1 likely fails, but the CDP
+       click in the PPT tab focuses it → round 2 succeeds.
    ================================================================ */
 
 /* ----------------------------------------------------------------
@@ -37,6 +35,14 @@ const CFG = {
   NAMESPACE: 'audit-img-',
   CLOSED_FLAG: 'audit-closed',
 };
+
+/* ----------------------------------------------------------------
+   Fixed slide dimensions (16:9 standard for PPT Online)
+   We no longer call pageSetup.load() — that was the source of the
+   "slideWidth is not loaded" error.
+---------------------------------------------------------------- */
+const SLIDE_W = 960;
+const SLIDE_H = 540;
 
 /* ----------------------------------------------------------------
    Shared state (defined in taskpane.js, referenced here)
@@ -98,7 +104,6 @@ function scanSlide(slide, slideW, slideH) {
     else if (bottom > slideH * CFG.FOOTER_BOT_FRAC) footer.push({ top });
   }
 
-  /* Sort by numeric part of name → stable order regardless of z-order */
   auditImages.sort((a, b) => auditImageIndex(a.name) - auditImageIndex(b.name));
 
   const headerBottom = header.length
@@ -155,22 +160,17 @@ function fitContain(slot, imgW, imgH) {
 }
 
 /* ================================================================
-   insertViaPaste — clipboard write + CDP paste, with retry
+   insertViaPaste — clipboard write + CDP paste with retry
    ----------------------------------------------------------------
-   The taskpane's clipboard write fails when the document isn't
-   focused. The CDP click inside the PPT tab focuses it. So:
-     1. Try clipboard write (may fail)
-     2. Fire CDP paste (focuses the tab)
-     3. Retry clipboard write (should succeed now)
-     4. Fire CDP paste again (uses the fresh clipboard)
-     5. Poll for the shape
+   Round 1: write clipboard (may fail — document not focused)
+            fire CDP paste (this focuses the PPT tab)
+   Round 2: rewrite clipboard (should succeed now)
+            fire CDP paste again (uses fresh clipboard)
+   Then poll for the new shape.
 ================================================================ */
 async function insertViaPaste(base64) {
   const dataUrl = 'data:image/png;base64,' + base64;
 
-  /* Helper — ask the content script to write the clipboard.
-     We don't wait for a reply (cross-frame replies are unreliable
-     in this setup). Just fire and give it time. */
   async function requestClipboardWrite(label) {
     try {
       window.parent.postMessage({
@@ -187,7 +187,6 @@ async function insertViaPaste(base64) {
     }
   }
 
-  /* Helper — ask the extension to fire CDP paste */
   async function requestPaste(label) {
     try {
       window.parent.postMessage({
@@ -202,18 +201,18 @@ async function insertViaPaste(base64) {
     }
   }
 
-  /* ─── Round 1 ─── */
+  /* Round 1 */
   await requestClipboardWrite('1/4 write');
   await requestPaste('2/4 paste');
 
   /* Wait for the CDP click to focus the PPT tab */
   await new Promise((r) => setTimeout(r, 900));
 
-  /* ─── Round 2 — now the tab is focused ─── */
+  /* Round 2 — tab is focused now */
   await requestClipboardWrite('3/4 rewrite');
   await requestPaste('4/4 repaste');
 
-  /* ─── Poll for the shape ─── */
+  /* Poll for the shape */
   const start = Date.now();
   while (Date.now() - start < 5000) {
     await new Promise((r) => setTimeout(r, 300));
@@ -268,11 +267,9 @@ async function runPlacement(dataUrl, mode) {
   let slotForNew = null;
 
   await PowerPoint.run(async (context) => {
-    const pageSetup = context.presentation.pageSetup;
-    pageSetup.load(['slideWidth', 'slideHeight']);
-    await context.sync();
-    const slideW = pageSetup.slideWidth;
-    const slideH = pageSetup.slideHeight;
+    /* Fixed slide dimensions — no pageSetup.load() */
+    const slideW = SLIDE_W;
+    const slideH = SLIDE_H;
 
     const slides = context.presentation.slides;
     slides.load('items');
