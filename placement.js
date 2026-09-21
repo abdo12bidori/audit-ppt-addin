@@ -1,23 +1,14 @@
 /* ================================================================
-   Audit Capture — Placement engine v2.1 (template-driven)
+   Audit Capture — Placement engine v2.2 (template-driven)
    ================================================================
-   No more scanning. No more shape detection. No more timeouts.
-
-   Flow:
-     1. Look up template by key (from AuditTemplates)
-     2. Ensure the required slide exists (add if missing)
-     3. Focus the target slide
-     4. If an image already exists in this slot → delete it
-     5. Paste the new image via CDP
-     6. Move it to the template's rect
-     7. Name it audit-img-<key>
-
-   User has full control afterwards — the Add-in never touches
-   the image again.
+   v2.2: deleteExistingInSlot now removes ANY image that overlaps
+         the target rect (not just named ones). This ensures an
+         orphaned image from a previous run is replaced instead of
+         duplicated.
    ================================================================ */
 
 const CFG = {
-  SLIDE_W: 960,      /* 16:9 */
+  SLIDE_W: 960,
   SLIDE_H: 540,
   NAMESPACE: 'audit-img-',
 };
@@ -40,7 +31,7 @@ function decodeImageDims(dataUrl) {
 }
 
 /* ================================================================
-   fitContain — scale image to fit rect, keep aspect, no distortion
+   fitContain
 ================================================================ */
 function fitContain(rect, imgW, imgH) {
   const scale = Math.min(rect.w / imgW, rect.h / imgH);
@@ -55,18 +46,14 @@ function fitContain(rect, imgW, imgH) {
 }
 
 /* ================================================================
-   insertViaPaste — clipboard write + CDP paste + retry
+   insertViaPaste
 ================================================================ */
 async function insertViaPaste(base64) {
   const dataUrl = 'data:image/png;base64,' + base64;
 
   async function requestClipboardWrite(label) {
     try {
-      window.parent.postMessage({
-        type: 'AUDIT_WRITE_CLIPBOARD',
-        dataUrl,
-        ts: Date.now(),
-      }, '*');
+      window.parent.postMessage({ type: 'AUDIT_WRITE_CLIPBOARD', dataUrl, ts: Date.now() }, '*');
       log(`→ [${label}] Demande d'écriture presse-papier envoyée`);
       await new Promise((r) => setTimeout(r, 500));
       return true;
@@ -78,10 +65,7 @@ async function insertViaPaste(base64) {
 
   async function requestPaste(label) {
     try {
-      window.parent.postMessage({
-        type: 'AUDIT_PASTE_REQUEST',
-        ts: Date.now(),
-      }, '*');
+      window.parent.postMessage({ type: 'AUDIT_PASTE_REQUEST', ts: Date.now() }, '*');
       log(`→ [${label}] Demande de collage envoyée`);
       return true;
     } catch (e) {
@@ -102,7 +86,7 @@ async function insertViaPaste(base64) {
 }
 
 /* ================================================================
-   ensureSlideExists — ensures the presentation has at least N slides
+   ensureSlideExists
 ================================================================ */
 async function ensureSlideExists(targetSlideNumber) {
   try {
@@ -137,10 +121,14 @@ async function ensureSlideExists(targetSlideNumber) {
 }
 
 /* ================================================================
-   deleteExistingInSlot — removes any image previously placed at
-   this slot (identified by shape name audit-img-<templateKey>)
+   deleteExistingInSlot
+   ----------------------------------------------------------------
+   v2.2: removes ANY image whose bounding box overlaps the target
+   rect — not just named images. This catches orphaned images from
+   previous runs, so a new paste replaces the old one instead of
+   stacking.
 ================================================================ */
-async function deleteExistingInSlot(templateKey, slideNumber) {
+async function deleteExistingInSlot(rect, slideNumber) {
   try {
     return await Promise.race([
       PowerPoint.run(async (context) => {
@@ -153,11 +141,33 @@ async function deleteExistingInSlot(templateKey, slideNumber) {
         slide.shapes.load('items');
         await context.sync();
 
-        const targetName = `${CFG.NAMESPACE}${templateKey}`;
         let deleted = 0;
+        const PAD = 20; /* tolerance in points */
+
+        /* Target rect with padding */
+        const tx1 = rect.x - PAD;
+        const ty1 = rect.y - PAD;
+        const tx2 = rect.x + rect.w + PAD;
+        const ty2 = rect.y + rect.h + PAD;
+
         for (const s of slide.shapes.items) {
-          if ((s.name || '') === targetName) {
-            try { s.delete(); deleted++; } catch (e) {}
+          /* Skip non-image shapes */
+          if (!s || s.type !== PowerPoint.ShapeType.image) continue;
+
+          const left = s.left ?? 0;
+          const top = s.top ?? 0;
+          const right = left + (s.width ?? 0);
+          const bottom = top + (s.height ?? 0);
+
+          /* Does the image overlap the target rect? */
+          const overlaps = !(right < tx1 || left > tx2 || bottom < ty1 || top > ty2);
+
+          if (overlaps) {
+            try {
+              s.delete();
+              deleted++;
+              console.log(`[AuditCapture:placement] deleted overlapping image at (${left.toFixed(0)},${top.toFixed(0)})`);
+            } catch (e) {}
           }
         }
         if (deleted > 0) await context.sync();
@@ -176,7 +186,7 @@ async function deleteExistingInSlot(templateKey, slideNumber) {
    Core — runPlacement
 ================================================================ */
 async function runPlacement(dataUrl, mode, templateKey) {
-  /* ─── 1. Resolve template ─── */
+  /* 1. Resolve template */
   const templates = window.AuditTemplates;
   if (!templates || typeof templates.get !== 'function') {
     throw new Error('AuditTemplates non chargé');
@@ -189,7 +199,7 @@ async function runPlacement(dataUrl, mode, templateKey) {
 
   log(`Template : ${tpl.label} → slide ${tpl.slide}, slot ${tpl.slot}`);
 
-  /* ─── 2. Decode dims ─── */
+  /* 2. Decode dims */
   let dims;
   try {
     dims = await decodeImageDims(dataUrl);
@@ -201,7 +211,7 @@ async function runPlacement(dataUrl, mode, templateKey) {
 
   const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
 
-  /* ─── 3. Ensure target slide exists ─── */
+  /* 3. Ensure target slide exists */
   const ensure = await ensureSlideExists(tpl.slide);
   if (ensure.ok) {
     log(`Slides : ${ensure.total}${ensure.added ? ' (' + ensure.added + ' ajoutée(s))' : ''}`);
@@ -209,13 +219,17 @@ async function runPlacement(dataUrl, mode, templateKey) {
     log('⚠️ ensureSlideExists : ' + ensure.error, 'err');
   }
 
-  /* ─── 4. Delete any existing image in the same slot ─── */
-  const del = await deleteExistingInSlot(tpl.key, tpl.slide);
+  /* 4. Delete any image overlapping the target rect */
+  const del = await deleteExistingInSlot(tpl.rect, tpl.slide);
   if (del.ok && del.deleted > 0) {
-    log(`🗑 ${del.deleted} ancienne image supprimée du slot`);
+    log(`🗑 ${del.deleted} image(s) supprimée(s) dans la zone cible`);
+  } else if (del.ok) {
+    log(`Zone cible vide (aucune image à supprimer)`);
+  } else {
+    log(`⚠️ deleteExistingInSlot : ${del.error}`, 'err');
   }
 
-  /* ─── 5. Focus the target slide before paste ─── */
+  /* 5. Focus the target slide */
   try {
     await Promise.race([
       PowerPoint.run(async (context) => {
@@ -236,14 +250,14 @@ async function runPlacement(dataUrl, mode, templateKey) {
     log('⚠️ Focus slide échoué : ' + e.message, 'err');
   }
 
-  /* ─── 6. Paste the image via CDP ─── */
+  /* 6. Paste via CDP */
   log('→ Insertion via collage (CDP)');
   const inserted = await insertViaPaste(base64);
   if (!inserted) {
     throw new Error('Insertion par collage échouée');
   }
 
-  /* ─── 7. Wait, then position the new image ─── */
+  /* 7. Position the new image */
   await new Promise((r) => setTimeout(r, 1500));
 
   const fitted = fitContain(tpl.rect, dims.w, dims.h);
@@ -284,7 +298,6 @@ async function runPlacement(dataUrl, mode, templateKey) {
 
         await context.sync();
 
-        /* Record in tracker (helpers.js) */
         try {
           if (window.AuditHelpers && typeof window.AuditHelpers.recordPlacedImage === 'function') {
             window.AuditHelpers.recordPlacedImage(
