@@ -7,84 +7,24 @@
   <script src="https://appsforoffice.microsoft.com/lib/1/hosted/office.js"></script>
   <style>
     * { box-sizing: border-box; font-family: system-ui, -apple-system, sans-serif; }
-    body {
-      margin: 0;
-      padding: 12px;
-      background: #0f172a;
-      color: #e2e8f0;
-      font-size: 13px;
-    }
+    body { margin: 0; padding: 12px; background: #0f172a; color: #e2e8f0; font-size: 13px; }
     h1 { font-size: 15px; margin: 0 0 4px; }
-    .status {
-      padding: 8px 10px;
-      background: #1e293b;
-      border-radius: 6px;
-      margin: 8px 0;
-      font-size: 12px;
-      border-left: 3px solid #64748b;
-    }
+    .status { padding: 8px 10px; background: #1e293b; border-radius: 6px; margin: 8px 0; font-size: 12px; border-left: 3px solid #64748b; }
     .status.ok { border-color: #22c55e; background: #052e16; }
     .status.err { border-color: #ef4444; background: #450a0a; }
-    .preflight {
-      padding: 8px 10px;
-      background: #0c2a3d;
-      border-radius: 6px;
-      margin: 8px 0;
-      font-size: 12px;
-      border-left: 3px solid #38bdf8;
-      color: #bae6fd;
-    }
-    .preflight.warn {
-      background: #3d2a0c;
-      border-color: #f59e0b;
-      color: #fde68a;
-    }
-    .stats {
-      padding: 8px 10px;
-      background: #1e293b;
-      border-radius: 6px;
-      font-size: 11px;
-      color: #94a3b8;
-      margin-bottom: 8px;
-    }
+    .stats { padding: 8px 10px; background: #1e293b; border-radius: 6px; font-size: 11px; color: #94a3b8; margin-bottom: 8px; }
     .stats span { color: #38bdf8; font-weight: 600; }
-    .log {
-      background: #020617;
-      border-radius: 6px;
-      padding: 8px;
-      font-family: ui-monospace, monospace;
-      font-size: 10px;
-      max-height: 240px;
-      overflow-y: auto;
-      margin-top: 8px;
-      color: #94a3b8;
-    }
+    .log { background: #020617; border-radius: 6px; padding: 8px; font-family: ui-monospace, monospace; font-size: 10px; max-height: 240px; overflow-y: auto; margin-top: 8px; color: #94a3b8; }
     .log div { padding: 2px 0; border-bottom: 1px solid #1e293b; }
     .log div.ok { color: #4ade80; }
     .log div.err { color: #f87171; }
-    button {
-      width: 100%;
-      padding: 8px;
-      border: 0;
-      background: #2563eb;
-      color: white;
-      border-radius: 6px;
-      cursor: pointer;
-      font-weight: 600;
-      font-size: 12px;
-      margin-top: 8px;
-    }
+    button { width: 100%; padding: 8px; border: 0; background: #2563eb; color: white; border-radius: 6px; cursor: pointer; font-weight: 600; font-size: 12px; margin-top: 8px; }
     button:hover { background: #1d4ed8; }
-    button.secondary { background: #374151; }
-    button.secondary:hover { background: #4b5563; }
   </style>
 </head>
 <body>
   <h1>📸 Audit Capture</h1>
   <div class="status" id="status">En attente de l'extension…</div>
-
-  <!-- ⭐ Pre-flight hint — shows where the next image will go -->
-  <div class="preflight" id="preflight" style="display:none;">—</div>
 
   <div class="stats">
     Slide actuelle : <span id="currentSlide">-</span> ·
@@ -93,13 +33,28 @@
   </div>
 
   <button id="reset">Réinitialiser la session</button>
-  <button id="refresh" class="secondary">🔄 Rafraîchir l'état de la slide</button>
 
   <div class="log" id="log"></div>
 
+  <!-- ⚠️ ORDER MATTERS -->
+
+  <!-- 1. Templates (just data — register on window.AuditTemplates) -->
+  <script src="templates/street.js?v=2"></script>
+  <script src="templates/obione.js?v=2"></script>
+  <script src="templates/onb.js?v=2"></script>
+  <script src="templates/ban.js?v=2"></script>
+  <script src="templates/index.js?v=2"></script>
+
+  <!-- 2. Helpers (tracker) -->
   <script src="helpers.js?v=2"></script>
-  <script src="query.js?v=1"></script>
-  <script src="placement.js?v=9"></script>
-  <script src="taskpane.js?v=9"></script>
+
+  <!-- 3. Query (pre-flight) -->
+  <script src="query.js?v=2"></script>
+
+  <!-- 4. Placement engine -->
+  <script src="placement.js?v=11"></script>
+
+  <!-- 5. UI / boot -->
+  <script src="taskpane.js?v=11"></script>
 </body>
 </html>

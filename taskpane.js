@@ -1,14 +1,5 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v3.7
-   ================================================================
-   This is the boot file. All placement logic lives in placement.js.
-
-   v3.7 changes:
-     - Exposes window.__auditQuerySlide() so the content script can
-       request the current slide state (pre-flight).
-     - Updates the pre-flight hint on the page.
-     - Manual "Rafraîchir" button.
-     - Reset button also clears the helper tracker.
+   Audit Capture — PowerPoint Add-in v4.0 (template-driven)
    ================================================================ */
 
 const state = {
@@ -24,15 +15,6 @@ function setStatus(text, cls = '') {
   if (el) {
     el.textContent = text;
     el.className = 'status ' + cls;
-  }
-}
-
-function setPreflight(text, cls = '') {
-  const el = document.getElementById('preflight');
-  if (el) {
-    el.textContent = text || '—';
-    el.className = 'preflight ' + cls;
-    el.style.display = text ? 'block' : 'none';
   }
 }
 
@@ -66,55 +48,30 @@ Office.onReady((info) => {
     return;
   }
 
-  if (!Office.context.requirements.isSetSupported('PowerPointApi', '1.2')) {
-    log('⚠️ PowerPointApi 1.2 non supporté — slides.add indisponible', 'err');
-  }
+  const templates = window.AuditTemplates && window.AuditTemplates.getList
+    ? window.AuditTemplates.getList()
+    : [];
+  log(`Add-in v4.0 démarré — ${templates.length} template(s) chargé(s) : ${templates.map((t) => t.label).join(', ')}`);
 
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
-  log('Add-in v3.7 démarré');
 
   listenForImages();
   exposeQueryApi();
 
   setTimeout(refreshStats, 1500);
-  setTimeout(refreshStats, 3000);
-  setTimeout(refreshPreflight, 2000);
 });
 
 /* ================================================================
    Pre-flight query API
 ================================================================ */
 function exposeQueryApi() {
-  /* The content script calls this via window.__auditQuerySlide() */
   window.__auditQuerySlide = async function () {
-    try {
-      if (window.AuditQuery && typeof window.AuditQuery.getSlideState === 'function') {
-        return await window.AuditQuery.getSlideState();
-      }
-      return { ok: false, error: 'AuditQuery not loaded', summary: 'Erreur' };
-    } catch (e) {
-      return { ok: false, error: e.message, summary: 'Erreur' };
-    }
+    return {
+      ok: true,
+      slideNumber: '?',
+      summary: 'Templates chargés : ' + (window.AuditTemplatesList || []).join(', '),
+    };
   };
-
-  /* And the content script can request a refresh of the visible hint */
-  window.__auditRefreshPreflight = async function () {
-    await refreshPreflight();
-  };
-}
-
-async function refreshPreflight() {
-  try {
-    if (!window.AuditQuery) return;
-    const result = await window.AuditQuery.getSlideState();
-    if (result.ok) {
-      setPreflight(result.summary, result.willCreateNewSlide ? 'warn' : '');
-    } else {
-      setPreflight('⚠️ ' + (result.error || 'Erreur'), 'warn');
-    }
-  } catch (e) {
-    setPreflight('⚠️ ' + e.message, 'warn');
-  }
 }
 
 /* ================================================================
@@ -125,55 +82,55 @@ let __lastDataUrlTs = 0;
 let __queue = Promise.resolve();
 
 function listenForImages() {
-  const enqueue = (dataUrl, mode, source) => {
+  const enqueue = (dataUrl, mode, templateKey, source) => {
     const now = Date.now();
-    if (dataUrl === __lastDataUrl && now - __lastDataUrlTs < 800) {
+    const dedupeKey = (templateKey || '') + '|' + dataUrl;
+    if (dedupeKey === __lastDataUrl && now - __lastDataUrlTs < 800) {
       log(`Image ignorée (doublon ${source})`);
       return;
     }
-    __lastDataUrl = dataUrl;
+    __lastDataUrl = dedupeKey;
     __lastDataUrlTs = now;
 
     __queue = __queue
-      .then(() => placeImage(dataUrl, mode || 'normal'))
+      .then(() => placeImage(dataUrl, mode || 'normal', templateKey || 'street'))
       .catch((e) => log('❌ placeImage rejected : ' + e.message, 'err'));
   };
 
   window.addEventListener('message', (e) => {
     if (!e.data || e.data.type !== 'AUDIT_ADD_IMAGE') return;
     const mode = e.data.mode || 'normal';
-    log(`Image reçue (postMessage, mode=${mode})`);
-    enqueue(e.data.dataUrl, mode, 'postMessage');
+    const templateKey = e.data.template || 'street';
+    log(`Image reçue (postMessage, mode=${mode}, template=${templateKey})`);
+    enqueue(e.data.dataUrl, mode, templateKey, 'postMessage');
   });
 
-  window.__auditPlaceImage = (dataUrl, mode) => {
-    log(`Image reçue (direct, mode=${mode || 'normal'})`);
-    enqueue(dataUrl, mode || 'normal', 'direct');
+  window.__auditPlaceImage = (dataUrl, mode, templateKey) => {
+    log(`Image reçue (direct, mode=${mode || 'normal'}, template=${templateKey || 'street'})`);
+    enqueue(dataUrl, mode || 'normal', templateKey || 'street', 'direct');
   };
 }
 
 /* ================================================================
-   placeImage wrapper with 12s watchdog
+   placeImage wrapper with 20s watchdog
 ================================================================ */
-async function placeImage(dataUrl, mode) {
+async function placeImage(dataUrl, mode, templateKey) {
   try {
-    setStatus('⏳ Placement…');
+    setStatus(`⏳ Placement ${templateKey}…`);
 
     const watchdog = new Promise((_, reject) =>
       setTimeout(
-        () => reject(new Error('Timeout — Office.js ne répond pas (12 s)')),
-        12000
+        () => reject(new Error('Timeout — Office.js ne répond pas (20 s)')),
+        20000
       )
     );
 
-    await Promise.race([runPlacement(dataUrl, mode), watchdog]);
+    await Promise.race([runPlacement(dataUrl, mode, templateKey), watchdog]);
     refreshStats();
-    refreshPreflight();
   } catch (err) {
     console.error(err);
     log('❌ Erreur : ' + err.message, 'err');
     setStatus('Erreur : ' + err.message, 'err');
-    refreshPreflight();
   }
 }
 
@@ -206,33 +163,14 @@ async function refreshStats() {
 }
 
 /* ================================================================
-   Buttons
+   Reset button
 ================================================================ */
 const resetBtn = document.getElementById('reset');
 if (resetBtn) {
   resetBtn.addEventListener('click', () => {
     state.imagesPlaced = 0;
     placementState.imagesPlaced = 0;
-    placementState.masterWarningShown = false;
-
-    try {
-      if (window.AuditHelpers && typeof window.AuditHelpers.resetHelperState === 'function') {
-        window.AuditHelpers.resetHelperState();
-      }
-    } catch (e) {}
-
     updateStats('-', 0);
-    setPreflight('');
     log('Session réinitialisée');
-    refreshPreflight();
-  });
-}
-
-const refreshBtn = document.getElementById('refresh');
-if (refreshBtn) {
-  refreshBtn.addEventListener('click', () => {
-    log('Rafraîchissement de l\'état de la slide…');
-    refreshStats();
-    refreshPreflight();
   });
 }

@@ -1,40 +1,26 @@
 /* ================================================================
-   Audit Capture — Placement engine v1.8
+   Audit Capture — Placement engine v2.1 (template-driven)
    ================================================================
-   All the image placement logic.
+   No more scanning. No more shape detection. No more timeouts.
 
-   v1.8 changes:
-     - HEADER_TOP_FRAC raised from 0.30 to 0.45, so slides whose
-       header extends past 30% (like the audit template with the
-       Analyse box) are correctly detected.
-     - scanSlide now classifies a shape as header if EITHER its top
-       OR its bottom falls within the top zone (catches boxes that
-       start above the zone but end inside it).
-     - Added group-shape handling — grouped shapes (type 'group')
-       are considered in the header/footer detection too, since
-       Office.js does not enumerate children.
-     - Tracker record moved to right after paste succeeds.
-     - Fallback chain for the "existing count" now uses
-       max(live, tracked, effectiveCount).
+   Flow:
+     1. Look up template by key (from AuditTemplates)
+     2. Ensure the required slide exists (add if missing)
+     3. Focus the target slide
+     4. If an image already exists in this slot → delete it
+     5. Paste the new image via CDP
+     6. Move it to the template's rect
+     7. Name it audit-img-<key>
+
+   User has full control afterwards — the Add-in never touches
+   the image again.
    ================================================================ */
 
 const CFG = {
-  MAX_PER_ROW: 3,
-  MARGIN_FRAC: 0.04,
-  GAP_FRAC: 0.015,
-  BODY_TOP_PAD_FRAC: 0.02,
-  BODY_BOT_PAD_FRAC: 0.02,
-  HEADER_TOP_FRAC: 0.45,        /* ★ was 0.30 — catches the Analyse box */
-  FOOTER_BOT_FRAC: 0.85,
-  FALLBACK_HEADER_FRAC: 0.15,
-  FALLBACK_FOOTER_FRAC: 0.90,
+  SLIDE_W: 960,      /* 16:9 */
+  SLIDE_H: 540,
   NAMESPACE: 'audit-img-',
-  CLOSED_FLAG: 'audit-closed',
 };
-
-/* Fixed slide dimensions (16:9) */
-const SLIDE_W = 960;
-const SLIDE_H = 540;
 
 const placementState = {
   imagesPlaced: 0,
@@ -54,144 +40,15 @@ function decodeImageDims(dataUrl) {
 }
 
 /* ================================================================
-   Parse "audit-img-N" → N
+   fitContain — scale image to fit rect, keep aspect, no distortion
 ================================================================ */
-function auditImageIndex(name) {
-  if (!name || !name.startsWith(CFG.NAMESPACE)) return Infinity;
-  const n = parseInt(name.slice(CFG.NAMESPACE.length), 10);
-  return Number.isFinite(n) ? n : Infinity;
-}
-
-/* ================================================================
-   Scan slide — merge Office.js view with local tracking
-================================================================ */
-function scanSlide(slide, slideW, slideH, slideIndex) {
-  const shapes = slide.shapes.items || [];
-  const header = [];
-  const footer = [];
-  const auditImages = [];
-  let closed = false;
-
-  const headerTopBound = slideH * CFG.HEADER_TOP_FRAC;
-  const footerBotBound = slideH * CFG.FOOTER_BOT_FRAC;
-
-  for (const s of shapes) {
-    if (!s || s.type === undefined) continue;
-    const name = s.name || '';
-
-    if (name.startsWith(CFG.CLOSED_FLAG)) {
-      closed = true;
-      continue;
-    }
-
-    if (name.startsWith(CFG.NAMESPACE)) {
-      auditImages.push(s);
-      continue;
-    }
-
-    const top = s.top ?? 0;
-    const bottom = top + (s.height ?? 0);
-
-    /* ★ Header detection: shape belongs to header if its TOP is
-       within the top zone OR its BOTTOM is still within it (catches
-       boxes that start above the zone but end inside it — like the
-       Analyse box in the audit template). */
-    if (top < headerTopBound || (bottom > 0 && bottom < headerTopBound)) {
-      header.push({ bottom });
-      continue;
-    }
-
-    /* Footer detection: bottom edge is below the footer top bound */
-    if (bottom > footerBotBound) {
-      footer.push({ top });
-    }
-  }
-
-  /* ★ Group shapes — Office.js returns them as a single shape
-     with type 'group' and does not enumerate children via
-     shapes.load('items'). Use the group's own top/height. */
-  try {
-    for (const s of shapes) {
-      if (!s || s.type !== PowerPoint.ShapeType.group) continue;
-      const top = s.top ?? 0;
-      const bottom = top + (s.height ?? 0);
-      if (top < headerTopBound || (bottom > 0 && bottom < headerTopBound)) {
-        header.push({ bottom });
-      } else if (bottom > footerBotBound) {
-        footer.push({ top });
-      }
-    }
-  } catch (e) {}
-
-  /* Sort audit images by numeric name order → stable across z-order */
-  auditImages.sort((a, b) => auditImageIndex(a.name) - auditImageIndex(b.name));
-
-  const headerBottom = header.length
-    ? Math.max(...header.map((h) => h.bottom))
-    : slideH * CFG.FALLBACK_HEADER_FRAC;
-
-  const footerTop = footer.length
-    ? Math.min(...footer.map((f) => f.top))
-    : slideH * CFG.FALLBACK_FOOTER_FRAC;
-
-  /* ★ Merge with the local tracking DB (helpers.js) */
-  let effectiveCount = auditImages.length;
-  let phantomCount = 0;
-  try {
-    if (window.AuditHelpers && typeof window.AuditHelpers.mergeImageViews === 'function') {
-      const merged = window.AuditHelpers.mergeImageViews(auditImages, slideIndex || 0);
-      effectiveCount = Math.max(auditImages.length, merged.effectiveCount);
-      phantomCount = merged.phantomCount;
-      console.log(
-        `[AuditCapture:helpers] slide ${slideIndex} — live=${merged.liveCount} tracked=${merged.trackedCount} phantom=${phantomCount} → effective=${effectiveCount}`
-      );
-    } else {
-      console.warn('[AuditCapture:helpers] AuditHelpers not loaded — using live count only');
-    }
-  } catch (e) {
-    console.warn('[AuditCapture:helpers] merge failed:', e.message);
-  }
-
-  return { headerBottom, footerTop, auditImages, closed, effectiveCount, phantomCount };
-}
-
-/* ================================================================
-   Compute grid
-================================================================ */
-function computeGrid(scan, N, slideW, slideH) {
-  const margin = slideW * CFG.MARGIN_FRAC;
-  const gap = slideW * CFG.GAP_FRAC;
-  const usableW = slideW - 2 * margin;
-
-  const bodyTop = scan.headerBottom + slideH * CFG.BODY_TOP_PAD_FRAC;
-  const bodyBottom = scan.footerTop - slideH * CFG.BODY_BOT_PAD_FRAC;
-  const bodyH = Math.max(bodyBottom - bodyTop, slideH * 0.15);
-
-  const cellW = (usableW - gap * (N - 1)) / N;
-  const cellH = bodyH;
-
-  const slots = [];
-  for (let i = 0; i < N; i++) {
-    slots.push({
-      x: margin + i * (cellW + gap),
-      y: bodyTop,
-      w: cellW,
-      h: cellH,
-    });
-  }
-  return slots;
-}
-
-/* ================================================================
-   fitContain
-================================================================ */
-function fitContain(slot, imgW, imgH) {
-  const scale = Math.min(slot.w / imgW, slot.h / imgH);
+function fitContain(rect, imgW, imgH) {
+  const scale = Math.min(rect.w / imgW, rect.h / imgH);
   const w = imgW * scale;
   const h = imgH * scale;
   return {
-    x: slot.x + (slot.w - w) / 2,
-    y: slot.y + (slot.h - h) / 2,
+    x: rect.x + (rect.w - w) / 2,
+    y: rect.y + (rect.h - h) / 2,
     w,
     h,
   };
@@ -245,9 +102,94 @@ async function insertViaPaste(base64) {
 }
 
 /* ================================================================
+   ensureSlideExists — ensures the presentation has at least N slides
+================================================================ */
+async function ensureSlideExists(targetSlideNumber) {
+  try {
+    return await Promise.race([
+      PowerPoint.run(async (context) => {
+        const slides = context.presentation.slides;
+        slides.load('items');
+        await context.sync();
+
+        let added = 0;
+        while (slides.items.length < targetSlideNumber) {
+          const lastSlide = slides.items[slides.items.length - 1];
+          lastSlide.layout.load('id');
+          await context.sync();
+          const layoutId = lastSlide.layout.id;
+
+          slides.add({ layoutId });
+          await context.sync();
+          slides.load('items');
+          await context.sync();
+          added++;
+        }
+        return { ok: true, added, total: slides.items.length };
+      }),
+      new Promise((resolve) =>
+        setTimeout(() => resolve({ ok: false, error: 'ensure timeout (4s)' }), 4000)
+      ),
+    ]);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/* ================================================================
+   deleteExistingInSlot — removes any image previously placed at
+   this slot (identified by shape name audit-img-<templateKey>)
+================================================================ */
+async function deleteExistingInSlot(templateKey, slideNumber) {
+  try {
+    return await Promise.race([
+      PowerPoint.run(async (context) => {
+        const slides = context.presentation.slides;
+        slides.load('items');
+        await context.sync();
+        if (slides.items.length < slideNumber) return { ok: true, deleted: 0 };
+
+        const slide = slides.items[slideNumber - 1];
+        slide.shapes.load('items');
+        await context.sync();
+
+        const targetName = `${CFG.NAMESPACE}${templateKey}`;
+        let deleted = 0;
+        for (const s of slide.shapes.items) {
+          if ((s.name || '') === targetName) {
+            try { s.delete(); deleted++; } catch (e) {}
+          }
+        }
+        if (deleted > 0) await context.sync();
+        return { ok: true, deleted };
+      }),
+      new Promise((resolve) =>
+        setTimeout(() => resolve({ ok: false, error: 'delete timeout (4s)' }), 4000)
+      ),
+    ]);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/* ================================================================
    Core — runPlacement
 ================================================================ */
-async function runPlacement(dataUrl, mode) {
+async function runPlacement(dataUrl, mode, templateKey) {
+  /* ─── 1. Resolve template ─── */
+  const templates = window.AuditTemplates;
+  if (!templates || typeof templates.get !== 'function') {
+    throw new Error('AuditTemplates non chargé');
+  }
+
+  const tpl = templates.get(templateKey);
+  if (!tpl) {
+    throw new Error('Template inconnu : ' + templateKey);
+  }
+
+  log(`Template : ${tpl.label} → slide ${tpl.slide}, slot ${tpl.slot}`);
+
+  /* ─── 2. Decode dims ─── */
   let dims;
   try {
     dims = await decodeImageDims(dataUrl);
@@ -257,142 +199,55 @@ async function runPlacement(dataUrl, mode) {
   }
   log(`Image : ${dims.w}×${dims.h}, mode=${mode}`);
 
-  /* Dedupe via helpers */
-  try {
-    if (window.AuditHelpers && typeof window.AuditHelpers.wasImageRecentlyPlaced === 'function') {
-      if (window.AuditHelpers.wasImageRecentlyPlaced(dataUrl)) {
-        log('⚠️ Image déjà placée récemment — ignorée');
-        return;
-      }
-      window.AuditHelpers.markImageAsRecent(dataUrl);
-    }
-  } catch (e) {}
-
   const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-  let totalAfter = 0;
-  let slotForNew = null;
-  let currentSlideIndex = 0;
 
-  /* ─── STEP 1: scan + reposition ─── */
+  /* ─── 3. Ensure target slide exists ─── */
+  const ensure = await ensureSlideExists(tpl.slide);
+  if (ensure.ok) {
+    log(`Slides : ${ensure.total}${ensure.added ? ' (' + ensure.added + ' ajoutée(s))' : ''}`);
+  } else {
+    log('⚠️ ensureSlideExists : ' + ensure.error, 'err');
+  }
+
+  /* ─── 4. Delete any existing image in the same slot ─── */
+  const del = await deleteExistingInSlot(tpl.key, tpl.slide);
+  if (del.ok && del.deleted > 0) {
+    log(`🗑 ${del.deleted} ancienne image supprimée du slot`);
+  }
+
+  /* ─── 5. Focus the target slide before paste ─── */
   try {
     await Promise.race([
       PowerPoint.run(async (context) => {
-        const slideW = SLIDE_W;
-        const slideH = SLIDE_H;
-
         const slides = context.presentation.slides;
         slides.load('items');
         await context.sync();
-        if (slides.items.length === 0) throw new Error('No slides in presentation');
-
-        let target = slides.items[slides.items.length - 1];
-        target.shapes.load('items');
-        await context.sync();
-
-        if (!placementState.masterWarningShown && slides.items.length === 1) {
-          if (target.shapes.items.length <= 2) {
-            log('⚠️ Le masque ne contient pas d\'en-tête.', 'err');
-            placementState.masterWarningShown = true;
-          }
-        }
-
-        let scan = scanSlide(target, slideW, slideH, slides.items.length);
-        log(`Slide ${slides.items.length} — ${scan.auditImages.length} image(s) live, ${scan.effectiveCount} effective, header→${scan.headerBottom.toFixed(0)}, footer→${scan.footerTop.toFixed(0)}, closed=${scan.closed}`);
-
-        const needsNewSlide = scan.effectiveCount >= CFG.MAX_PER_ROW || scan.closed;
-        if (needsNewSlide) {
-          const reason = scan.closed ? 'clôturée (END)' : `pleine (${scan.effectiveCount}/${CFG.MAX_PER_ROW})`;
-          log(`Slide ${reason} → nouvelle slide`);
-
-          target.layout.load('id');
-          await context.sync();
-          const layoutId = target.layout.id;
-
-          slides.add({ layoutId });
-          await context.sync();
-
-          slides.load('items');
-          await context.sync();
-          target = slides.items[slides.items.length - 1];
-          target.shapes.load('items');
-          await context.sync();
-          scan = scanSlide(target, slideW, slideH, slides.items.length);
-          log(`Nouvelle slide : ${slides.items.length}`);
-        }
-
-        /* Fallback chain for existing count */
-        let effectiveExisting = scan.auditImages.length;
-        try {
-          if (window.AuditHelpers && typeof window.AuditHelpers.getTrackedImages === 'function') {
-            const tracked = window.AuditHelpers.getTrackedImages(slides.items.length);
-            effectiveExisting = Math.max(effectiveExisting, tracked.length, scan.effectiveCount || 0);
-          }
-        } catch (e) {}
-        totalAfter = effectiveExisting + 1;
-        currentSlideIndex = slides.items.length;
-        log(`Placement : ${effectiveExisting} image(s) détectée(s) → slot ${totalAfter}`);
-
-        const slots = computeGrid(scan, totalAfter, slideW, slideH);
-        slotForNew = slots[totalAfter - 1];
-        log(`Grille : ${totalAfter} slot(s), largeur ${slots[0].w.toFixed(0)}, hauteur ${slots[0].h.toFixed(0)}`);
-
-        for (let i = 0; i < scan.auditImages.length; i++) {
-          const img = scan.auditImages[i];
-          const slot = slots[i];
-          const curW = img.width || 1;
-          const curH = img.height || 1;
-          const ratio = curH / curW;
-          const fakeW = slot.w;
-          const fakeH = fakeW * ratio;
-          const fitted = fitContain(slot, fakeW, fakeH);
-          img.left = fitted.x;
-          img.top = fitted.y;
-          img.width = fitted.w;
-          img.height = fitted.h;
-        }
+        if (slides.items.length < tpl.slide) return;
+        const target = slides.items[tpl.slide - 1];
+        context.presentation.setSelectedSlides([target.id]);
         await context.sync();
       }),
       new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('scan timed out (6s)')), 6000)
+        setTimeout(() => reject(new Error('focus timeout (3s)')), 3000)
       ),
     ]);
+    log(`Slide ${tpl.slide} sélectionnée`);
   } catch (e) {
-    log('⚠️ Scan échoué : ' + e.message + ' — poursuite du collage', 'err');
+    log('⚠️ Focus slide échoué : ' + e.message, 'err');
   }
 
-  /* ─── STEP 2: paste ─── */
+  /* ─── 6. Paste the image via CDP ─── */
   log('→ Insertion via collage (CDP)');
   const inserted = await insertViaPaste(base64);
   if (!inserted) {
     throw new Error('Insertion par collage échouée');
   }
 
-  /* ★ Record in the local tracker IMMEDIATELY after paste succeeds —
-       even if positioning later fails, the next send will know this
-       image exists. */
-  try {
-    if (window.AuditHelpers && typeof window.AuditHelpers.recordPlacedImage === 'function') {
-      window.AuditHelpers.recordPlacedImage(
-        currentSlideIndex || 0,
-        `${CFG.NAMESPACE}${totalAfter}`,
-        { slotIndex: totalAfter }
-      );
-      log(`★ Enregistré dans le tracker : audit-img-${totalAfter} sur slide ${currentSlideIndex}`);
-    } else {
-      log('⚠️ AuditHelpers non chargé — pas de tracking', 'err');
-    }
-  } catch (e) {
-    log('⚠️ Tracker error : ' + e.message, 'err');
-  }
-
-  /* ─── STEP 3: name & position — 2 attempts × 6 s ─── */
+  /* ─── 7. Wait, then position the new image ─── */
   await new Promise((r) => setTimeout(r, 1500));
 
-  const localIndex = totalAfter;
-  const localSlot = slotForNew;
-  const localDims = dims;
-  const localSlideIndex = currentSlideIndex;
-  const localMode = mode;
+  const fitted = fitContain(tpl.rect, dims.w, dims.h);
+  log(`Position cible : x=${fitted.x.toFixed(0)} y=${fitted.y.toFixed(0)} w=${fitted.w.toFixed(0)} h=${fitted.h.toFixed(0)}`);
 
   async function tryPositioning(timeoutMs) {
     return await Promise.race([
@@ -400,15 +255,19 @@ async function runPlacement(dataUrl, mode) {
         const slides = context.presentation.slides;
         slides.load('items');
         await context.sync();
-        const lastSlide = slides.items[slides.items.length - 1];
-        lastSlide.shapes.load('items');
+        if (slides.items.length < tpl.slide) {
+          return { ok: false, reason: 'slide missing' };
+        }
+
+        const target = slides.items[tpl.slide - 1];
+        target.shapes.load('items');
         await context.sync();
 
-        const candidates = lastSlide.shapes.items.filter(
+        /* Find the newest untagged image on the target slide */
+        const candidates = target.shapes.items.filter(
           (s) =>
             s.type === PowerPoint.ShapeType.image &&
-            !(s.name || '').startsWith(CFG.NAMESPACE) &&
-            !(s.name || '').startsWith(CFG.CLOSED_FLAG)
+            !(s.name || '').startsWith(CFG.NAMESPACE)
         );
 
         if (candidates.length === 0) {
@@ -416,10 +275,8 @@ async function runPlacement(dataUrl, mode) {
         }
 
         const newImg = candidates[candidates.length - 1];
-        const index = localIndex;
-        try { newImg.name = `${CFG.NAMESPACE}${index}`; } catch (e) {}
+        try { newImg.name = `${CFG.NAMESPACE}${tpl.key}`; } catch (e) {}
 
-        const fitted = fitContain(localSlot, localDims.w, localDims.h);
         newImg.left = fitted.x;
         newImg.top = fitted.y;
         newImg.width = fitted.w;
@@ -427,17 +284,16 @@ async function runPlacement(dataUrl, mode) {
 
         await context.sync();
 
-        if (localMode === 'end') {
-          try {
-            const marker = lastSlide.shapes.addTextBox(' ');
-            marker.name = `${CFG.CLOSED_FLAG}-${Date.now()}`;
-            marker.left = -100;
-            marker.top = -100;
-            marker.width = 1;
-            marker.height = 1;
-            await context.sync();
-          } catch (e) {}
-        }
+        /* Record in tracker (helpers.js) */
+        try {
+          if (window.AuditHelpers && typeof window.AuditHelpers.recordPlacedImage === 'function') {
+            window.AuditHelpers.recordPlacedImage(
+              tpl.slide,
+              `${CFG.NAMESPACE}${tpl.key}`,
+              { slotIndex: tpl.slot, w: fitted.w, h: fitted.h }
+            );
+          }
+        } catch (e) {}
 
         return { ok: true };
       }),
@@ -449,18 +305,22 @@ async function runPlacement(dataUrl, mode) {
 
   let pos = await tryPositioning(6000);
   if (pos.ok) {
-    log(`✅ Image ${localIndex} placée — slot ${localIndex}/${CFG.MAX_PER_ROW}`, 'ok');
+    log(`✅ Image ${tpl.label} placée sur slide ${tpl.slide}`, 'ok');
   } else {
-    log(`⚠️ Positionnement 1 échoué : ${pos.reason} — retry`, 'err');
+    log(`⚠️ Positionnement échoué : ${pos.reason} — retry`, 'err');
     await new Promise((r) => setTimeout(r, 500));
     pos = await tryPositioning(6000);
     if (pos.ok) {
-      log(`✅ Image ${localIndex} placée (retry) — slot ${localIndex}/${CFG.MAX_PER_ROW}`, 'ok');
+      log(`✅ Image ${tpl.label} placée (retry) sur slide ${tpl.slide}`, 'ok');
     } else {
-      log(`⚠️ Positionnement 2 échoué : ${pos.reason} — l'image reste visible mais non taguée`, 'err');
+      log(`⚠️ Positionnement définitif échoué : ${pos.reason}`, 'err');
     }
   }
 
+  if (mode === 'end') {
+    log('🔒 Mode END');
+  }
+
   placementState.imagesPlaced++;
-  setStatus(`✅ Image placée (${localIndex}/${CFG.MAX_PER_ROW})${localMode === 'end' ? ' — clôturée' : ''}`, 'ok');
+  setStatus(`✅ ${tpl.label} placé (slide ${tpl.slide})`, 'ok');
 }
