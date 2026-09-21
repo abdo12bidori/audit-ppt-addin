@@ -1,10 +1,9 @@
 /* ================================================================
-   Audit Capture — Placement engine v2.2 (template-driven)
+   Audit Capture — Placement engine v2.4
    ================================================================
-   v2.2: deleteExistingInSlot now removes ANY image that overlaps
-         the target rect (not just named ones). This ensures an
-         orphaned image from a previous run is replaced instead of
-         duplicated.
+   v2.4:
+     - ensureSlideExists uses slide 1's layout for new slides, so
+       slide 2 inherits the same template (header/footer) as slide 1.
    ================================================================ */
 
 const CFG = {
@@ -87,6 +86,9 @@ async function insertViaPaste(base64) {
 
 /* ================================================================
    ensureSlideExists
+   ----------------------------------------------------------------
+   Uses SLIDE 1's layout for any new slides. That way slide 2 (and
+   any further slide) inherits the same template as slide 1.
 ================================================================ */
 async function ensureSlideExists(targetSlideNumber) {
   try {
@@ -96,12 +98,17 @@ async function ensureSlideExists(targetSlideNumber) {
         slides.load('items');
         await context.sync();
 
+        if (slides.items.length === 0) {
+          return { ok: false, error: 'no slides at all' };
+        }
+
         let added = 0;
         while (slides.items.length < targetSlideNumber) {
-          const lastSlide = slides.items[slides.items.length - 1];
-          lastSlide.layout.load('id');
+          /* Use slide 1 as the layout template */
+          const templateSlide = slides.items[0];
+          templateSlide.layout.load('id');
           await context.sync();
-          const layoutId = lastSlide.layout.id;
+          const layoutId = templateSlide.layout.id;
 
           slides.add({ layoutId });
           await context.sync();
@@ -121,14 +128,9 @@ async function ensureSlideExists(targetSlideNumber) {
 }
 
 /* ================================================================
-   deleteExistingInSlot
-   ----------------------------------------------------------------
-   v2.2: removes ANY image whose bounding box overlaps the target
-   rect — not just named images. This catches orphaned images from
-   previous runs, so a new paste replaces the old one instead of
-   stacking.
+   deleteOverlappingImages
 ================================================================ */
-async function deleteExistingInSlot(rect, slideNumber) {
+async function deleteOverlappingImages(rect, slideNumber) {
   try {
     return await Promise.race([
       PowerPoint.run(async (context) => {
@@ -142,16 +144,14 @@ async function deleteExistingInSlot(rect, slideNumber) {
         await context.sync();
 
         let deleted = 0;
-        const PAD = 20; /* tolerance in points */
+        const PAD = 20;
 
-        /* Target rect with padding */
         const tx1 = rect.x - PAD;
         const ty1 = rect.y - PAD;
         const tx2 = rect.x + rect.w + PAD;
         const ty2 = rect.y + rect.h + PAD;
 
         for (const s of slide.shapes.items) {
-          /* Skip non-image shapes */
           if (!s || s.type !== PowerPoint.ShapeType.image) continue;
 
           const left = s.left ?? 0;
@@ -159,14 +159,12 @@ async function deleteExistingInSlot(rect, slideNumber) {
           const right = left + (s.width ?? 0);
           const bottom = top + (s.height ?? 0);
 
-          /* Does the image overlap the target rect? */
           const overlaps = !(right < tx1 || left > tx2 || bottom < ty1 || top > ty2);
 
           if (overlaps) {
             try {
               s.delete();
               deleted++;
-              console.log(`[AuditCapture:placement] deleted overlapping image at (${left.toFixed(0)},${top.toFixed(0)})`);
             } catch (e) {}
           }
         }
@@ -183,82 +181,102 @@ async function deleteExistingInSlot(rect, slideNumber) {
 }
 
 /* ================================================================
+   snapshotImages
+================================================================ */
+async function snapshotImages(slideNumber) {
+  try {
+    return await Promise.race([
+      PowerPoint.run(async (context) => {
+        const slides = context.presentation.slides;
+        slides.load('items');
+        await context.sync();
+        if (slides.items.length < slideNumber) return { ok: true, ids: [] };
+
+        const slide = slides.items[slideNumber - 1];
+        slide.shapes.load('items');
+        await context.sync();
+
+        const ids = slide.shapes.items
+          .filter((s) => s.type === PowerPoint.ShapeType.image)
+          .map((s) => s.id);
+        return { ok: true, ids };
+      }),
+      new Promise((resolve) =>
+        setTimeout(() => resolve({ ok: false, error: 'snapshot timeout (3s)' }), 3000)
+      ),
+    ]);
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+}
+
+/* ================================================================
    Core — runPlacement
 ================================================================ */
 async function runPlacement(dataUrl, mode, templateKey) {
-  /* 1. Resolve template */
   const templates = window.AuditTemplates;
   if (!templates || typeof templates.get !== 'function') {
     throw new Error('AuditTemplates non chargé');
   }
 
   const tpl = templates.get(templateKey);
-  if (!tpl) {
-    throw new Error('Template inconnu : ' + templateKey);
-  }
+  if (!tpl) throw new Error('Template inconnu : ' + templateKey);
 
   log(`Template : ${tpl.label} → slide ${tpl.slide}, slot ${tpl.slot}`);
 
-  /* 2. Decode dims */
   let dims;
   try {
     dims = await decodeImageDims(dataUrl);
   } catch (e) {
-    log('⚠️ Cannot decode image dims — fallback 4:3', 'err');
     dims = { w: 800, h: 600 };
   }
   log(`Image : ${dims.w}×${dims.h}, mode=${mode}`);
 
   const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
 
-  /* 3. Ensure target slide exists */
+  /* Ensure the target slide exists */
   const ensure = await ensureSlideExists(tpl.slide);
   if (ensure.ok) {
     log(`Slides : ${ensure.total}${ensure.added ? ' (' + ensure.added + ' ajoutée(s))' : ''}`);
-  } else {
-    log('⚠️ ensureSlideExists : ' + ensure.error, 'err');
   }
 
-  /* 4. Delete any image overlapping the target rect */
-  const del = await deleteExistingInSlot(tpl.rect, tpl.slide);
+  /* Delete overlapping images in the target slot */
+  const del = await deleteOverlappingImages(tpl.rect, tpl.slide);
   if (del.ok && del.deleted > 0) {
     log(`🗑 ${del.deleted} image(s) supprimée(s) dans la zone cible`);
   } else if (del.ok) {
-    log(`Zone cible vide (aucune image à supprimer)`);
+    log(`Zone cible vide`);
   } else {
-    log(`⚠️ deleteExistingInSlot : ${del.error}`, 'err');
+    log(`⚠️ delete: ${del.error}`, 'err');
   }
 
-  /* 5. Focus the target slide */
+  /* Snapshot remaining image IDs (for ID-diff detection) */
+  const snap = await snapshotImages(tpl.slide);
+  const beforeIds = new Set(snap.ok ? snap.ids : []);
+  log(`Snapshot : ${beforeIds.size} image(s) existante(s)`);
+
+  /* Focus the target slide */
   try {
-    await Promise.race([
-      PowerPoint.run(async (context) => {
-        const slides = context.presentation.slides;
-        slides.load('items');
-        await context.sync();
-        if (slides.items.length < tpl.slide) return;
-        const target = slides.items[tpl.slide - 1];
-        context.presentation.setSelectedSlides([target.id]);
-        await context.sync();
-      }),
-      new Promise((_, reject) =>
-        setTimeout(() => reject(new Error('focus timeout (3s)')), 3000)
-      ),
-    ]);
+    await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+      if (slides.items.length < tpl.slide) return;
+      const target = slides.items[tpl.slide - 1];
+      context.presentation.setSelectedSlides([target.id]);
+      await context.sync();
+    });
     log(`Slide ${tpl.slide} sélectionnée`);
   } catch (e) {
     log('⚠️ Focus slide échoué : ' + e.message, 'err');
   }
 
-  /* 6. Paste via CDP */
+  /* Paste via CDP */
   log('→ Insertion via collage (CDP)');
   const inserted = await insertViaPaste(base64);
-  if (!inserted) {
-    throw new Error('Insertion par collage échouée');
-  }
+  if (!inserted) throw new Error('Insertion par collage échouée');
 
-  /* 7. Position the new image */
-  await new Promise((r) => setTimeout(r, 1500));
+  await new Promise((r) => setTimeout(r, 1200));
 
   const fitted = fitContain(tpl.rect, dims.w, dims.h);
   log(`Position cible : x=${fitted.x.toFixed(0)} y=${fitted.y.toFixed(0)} w=${fitted.w.toFixed(0)} h=${fitted.h.toFixed(0)}`);
@@ -269,26 +287,28 @@ async function runPlacement(dataUrl, mode, templateKey) {
         const slides = context.presentation.slides;
         slides.load('items');
         await context.sync();
-        if (slides.items.length < tpl.slide) {
-          return { ok: false, reason: 'slide missing' };
-        }
+        if (slides.items.length < tpl.slide) return { ok: false, reason: 'slide missing' };
 
         const target = slides.items[tpl.slide - 1];
         target.shapes.load('items');
         await context.sync();
 
-        /* Find the newest untagged image on the target slide */
-        const candidates = target.shapes.items.filter(
-          (s) =>
-            s.type === PowerPoint.ShapeType.image &&
-            !(s.name || '').startsWith(CFG.NAMESPACE)
+        const allImages = target.shapes.items.filter(
+          (s) => s.type === PowerPoint.ShapeType.image
         );
+        const newImages = allImages.filter((s) => !beforeIds.has(s.id));
 
-        if (candidates.length === 0) {
-          return { ok: false, reason: 'no candidate image' };
+        if (newImages.length === 0) {
+          return { ok: false, reason: 'no new image found' };
         }
 
-        const newImg = candidates[candidates.length - 1];
+        const newImg = newImages[newImages.length - 1];
+
+        /* Delete extra new images (defensive) */
+        for (let i = 0; i < newImages.length - 1; i++) {
+          try { newImages[i].delete(); } catch (e) {}
+        }
+
         try { newImg.name = `${CFG.NAMESPACE}${tpl.key}`; } catch (e) {}
 
         newImg.left = fitted.x;
@@ -316,17 +336,26 @@ async function runPlacement(dataUrl, mode, templateKey) {
     ]);
   }
 
-  let pos = await tryPositioning(6000);
+  let pos = await tryPositioning(4000);
   if (pos.ok) {
     log(`✅ Image ${tpl.label} placée sur slide ${tpl.slide}`, 'ok');
   } else {
-    log(`⚠️ Positionnement échoué : ${pos.reason} — retry`, 'err');
-    await new Promise((r) => setTimeout(r, 500));
-    pos = await tryPositioning(6000);
+    log(`⚠️ Positionnement 1 : ${pos.reason} — retry`, 'err');
+    await new Promise((r) => setTimeout(r, 800));
+    pos = await tryPositioning(4000);
     if (pos.ok) {
       log(`✅ Image ${tpl.label} placée (retry) sur slide ${tpl.slide}`, 'ok');
     } else {
-      log(`⚠️ Positionnement définitif échoué : ${pos.reason}`, 'err');
+      log(`⚠️ Positionnement échoué : ${pos.reason}`, 'err');
+      try {
+        if (window.AuditHelpers && typeof window.AuditHelpers.recordPlacedImage === 'function') {
+          window.AuditHelpers.recordPlacedImage(
+            tpl.slide,
+            `${CFG.NAMESPACE}${tpl.key}__orphan_${Date.now()}`,
+            { slotIndex: tpl.slot, w: fitted.w, h: fitted.h, orphanRect: tpl.rect }
+          );
+        }
+      } catch (e) {}
     }
   }
 
