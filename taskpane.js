@@ -1,16 +1,11 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v3.4
+   Audit Capture — PowerPoint Add-in v3.5
    ================================================================
    This is the boot file. All placement logic lives in placement.js.
 
-   v3.4 changes:
-     - Removed post-placement refreshStats() call (was triggering
-       Office.js unmount when it failed after a bad placement).
-     - Logged refreshStats errors instead of swallowing them.
-     - Reduced watchdog from 15 s to 8 s so Office.js doesn't
-       consider the Add-in unresponsive.
-     - Two refreshStats calls at boot (1500 ms, 3000 ms) so the
-       Add-in has time to read slides on slower tenants.
+   v3.5 changes:
+     - Reset button also clears the local tracking DB (helpers.js).
+     - Version string bumped.
    ================================================================ */
 
 const state = {
@@ -64,11 +59,10 @@ Office.onReady((info) => {
   }
 
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
-  log('Add-in v3.4 démarré');
+  log('Add-in v3.5 démarré');
 
   listenForImages();
 
-  /* Two delayed attempts — gives Office.js time to init */
   setTimeout(refreshStats, 1500);
   setTimeout(refreshStats, 3000);
 });
@@ -123,7 +117,6 @@ async function placeImage(dataUrl, mode) {
     );
 
     await Promise.race([runPlacement(dataUrl, mode), watchdog]);
-    /* No post-placement refreshStats — it was killing the Add-in. */
   } catch (err) {
     console.error(err);
     log('❌ Erreur : ' + err.message, 'err');
@@ -168,6 +161,14 @@ if (resetBtn) {
     state.imagesPlaced = 0;
     placementState.imagesPlaced = 0;
     placementState.masterWarningShown = false;
+
+    /* ★ Clear the local tracker too */
+    try {
+      if (window.AuditHelpers && typeof window.AuditHelpers.resetHelperState === 'function') {
+        window.AuditHelpers.resetHelperState();
+      }
+    } catch (e) {}
+
     updateStats('-', 0);
     log('Session réinitialisée');
   });
