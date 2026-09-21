@@ -1,11 +1,14 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v3.5
+   Audit Capture — PowerPoint Add-in v3.7
    ================================================================
    This is the boot file. All placement logic lives in placement.js.
 
-   v3.5 changes:
-     - Reset button also clears the local tracking DB (helpers.js).
-     - Version string bumped.
+   v3.7 changes:
+     - Exposes window.__auditQuerySlide() so the content script can
+       request the current slide state (pre-flight).
+     - Updates the pre-flight hint on the page.
+     - Manual "Rafraîchir" button.
+     - Reset button also clears the helper tracker.
    ================================================================ */
 
 const state = {
@@ -21,6 +24,15 @@ function setStatus(text, cls = '') {
   if (el) {
     el.textContent = text;
     el.className = 'status ' + cls;
+  }
+}
+
+function setPreflight(text, cls = '') {
+  const el = document.getElementById('preflight');
+  if (el) {
+    el.textContent = text || '—';
+    el.className = 'preflight ' + cls;
+    el.style.display = text ? 'block' : 'none';
   }
 }
 
@@ -59,13 +71,51 @@ Office.onReady((info) => {
   }
 
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
-  log('Add-in v3.5 démarré');
+  log('Add-in v3.7 démarré');
 
   listenForImages();
+  exposeQueryApi();
 
   setTimeout(refreshStats, 1500);
   setTimeout(refreshStats, 3000);
+  setTimeout(refreshPreflight, 2000);
 });
+
+/* ================================================================
+   Pre-flight query API
+================================================================ */
+function exposeQueryApi() {
+  /* The content script calls this via window.__auditQuerySlide() */
+  window.__auditQuerySlide = async function () {
+    try {
+      if (window.AuditQuery && typeof window.AuditQuery.getSlideState === 'function') {
+        return await window.AuditQuery.getSlideState();
+      }
+      return { ok: false, error: 'AuditQuery not loaded', summary: 'Erreur' };
+    } catch (e) {
+      return { ok: false, error: e.message, summary: 'Erreur' };
+    }
+  };
+
+  /* And the content script can request a refresh of the visible hint */
+  window.__auditRefreshPreflight = async function () {
+    await refreshPreflight();
+  };
+}
+
+async function refreshPreflight() {
+  try {
+    if (!window.AuditQuery) return;
+    const result = await window.AuditQuery.getSlideState();
+    if (result.ok) {
+      setPreflight(result.summary, result.willCreateNewSlide ? 'warn' : '');
+    } else {
+      setPreflight('⚠️ ' + (result.error || 'Erreur'), 'warn');
+    }
+  } catch (e) {
+    setPreflight('⚠️ ' + e.message, 'warn');
+  }
+}
 
 /* ================================================================
    Listen for images — dedupe + serialize
@@ -103,7 +153,7 @@ function listenForImages() {
 }
 
 /* ================================================================
-   placeImage wrapper with 8s watchdog
+   placeImage wrapper with 12s watchdog
 ================================================================ */
 async function placeImage(dataUrl, mode) {
   try {
@@ -111,16 +161,19 @@ async function placeImage(dataUrl, mode) {
 
     const watchdog = new Promise((_, reject) =>
       setTimeout(
-        () => reject(new Error('Timeout — Office.js ne répond pas (8 s)')),
-        8000
+        () => reject(new Error('Timeout — Office.js ne répond pas (12 s)')),
+        12000
       )
     );
 
     await Promise.race([runPlacement(dataUrl, mode), watchdog]);
+    refreshStats();
+    refreshPreflight();
   } catch (err) {
     console.error(err);
     log('❌ Erreur : ' + err.message, 'err');
     setStatus('Erreur : ' + err.message, 'err');
+    refreshPreflight();
   }
 }
 
@@ -153,7 +206,7 @@ async function refreshStats() {
 }
 
 /* ================================================================
-   Reset button
+   Buttons
 ================================================================ */
 const resetBtn = document.getElementById('reset');
 if (resetBtn) {
@@ -162,7 +215,6 @@ if (resetBtn) {
     placementState.imagesPlaced = 0;
     placementState.masterWarningShown = false;
 
-    /* ★ Clear the local tracker too */
     try {
       if (window.AuditHelpers && typeof window.AuditHelpers.resetHelperState === 'function') {
         window.AuditHelpers.resetHelperState();
@@ -170,6 +222,17 @@ if (resetBtn) {
     } catch (e) {}
 
     updateStats('-', 0);
+    setPreflight('');
     log('Session réinitialisée');
+    refreshPreflight();
+  });
+}
+
+const refreshBtn = document.getElementById('refresh');
+if (refreshBtn) {
+  refreshBtn.addEventListener('click', () => {
+    log('Rafraîchissement de l\'état de la slide…');
+    refreshStats();
+    refreshPreflight();
   });
 }

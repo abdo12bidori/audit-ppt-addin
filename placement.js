@@ -1,18 +1,21 @@
 /* ================================================================
-   Audit Capture — Placement engine v1.6
+   Audit Capture — Placement engine v1.8
    ================================================================
    All the image placement logic.
 
-   v1.6 changes:
-     - scanSlide now merges Office.js results with the local
-       tracking DB (helpers.js) → effectiveCount includes phantom
-       images that Office.js hasn't reflected yet.
-     - runPlacement uses effectiveCount to compute totalAfter, so
-       a missed previous image doesn't cause slot-1 reuse.
-     - After successful positioning, we record the image in the
-       tracking DB.
-     - Step 1 & Step 3 use 6 s timeouts (up from 3 s).
-     - Removed didInsertWork() polling.
+   v1.8 changes:
+     - HEADER_TOP_FRAC raised from 0.30 to 0.45, so slides whose
+       header extends past 30% (like the audit template with the
+       Analyse box) are correctly detected.
+     - scanSlide now classifies a shape as header if EITHER its top
+       OR its bottom falls within the top zone (catches boxes that
+       start above the zone but end inside it).
+     - Added group-shape handling — grouped shapes (type 'group')
+       are considered in the header/footer detection too, since
+       Office.js does not enumerate children.
+     - Tracker record moved to right after paste succeeds.
+     - Fallback chain for the "existing count" now uses
+       max(live, tracked, effectiveCount).
    ================================================================ */
 
 const CFG = {
@@ -21,7 +24,7 @@ const CFG = {
   GAP_FRAC: 0.015,
   BODY_TOP_PAD_FRAC: 0.02,
   BODY_BOT_PAD_FRAC: 0.02,
-  HEADER_TOP_FRAC: 0.30,
+  HEADER_TOP_FRAC: 0.45,        /* ★ was 0.30 — catches the Analyse box */
   FOOTER_BOT_FRAC: 0.85,
   FALLBACK_HEADER_FRAC: 0.15,
   FALLBACK_FOOTER_FRAC: 0.90,
@@ -69,6 +72,9 @@ function scanSlide(slide, slideW, slideH, slideIndex) {
   const auditImages = [];
   let closed = false;
 
+  const headerTopBound = slideH * CFG.HEADER_TOP_FRAC;
+  const footerBotBound = slideH * CFG.FOOTER_BOT_FRAC;
+
   for (const s of shapes) {
     if (!s || s.type === undefined) continue;
     const name = s.name || '';
@@ -86,10 +92,38 @@ function scanSlide(slide, slideW, slideH, slideIndex) {
     const top = s.top ?? 0;
     const bottom = top + (s.height ?? 0);
 
-    if (top < slideH * CFG.HEADER_TOP_FRAC) header.push({ bottom });
-    else if (bottom > slideH * CFG.FOOTER_BOT_FRAC) footer.push({ top });
+    /* ★ Header detection: shape belongs to header if its TOP is
+       within the top zone OR its BOTTOM is still within it (catches
+       boxes that start above the zone but end inside it — like the
+       Analyse box in the audit template). */
+    if (top < headerTopBound || (bottom > 0 && bottom < headerTopBound)) {
+      header.push({ bottom });
+      continue;
+    }
+
+    /* Footer detection: bottom edge is below the footer top bound */
+    if (bottom > footerBotBound) {
+      footer.push({ top });
+    }
   }
 
+  /* ★ Group shapes — Office.js returns them as a single shape
+     with type 'group' and does not enumerate children via
+     shapes.load('items'). Use the group's own top/height. */
+  try {
+    for (const s of shapes) {
+      if (!s || s.type !== PowerPoint.ShapeType.group) continue;
+      const top = s.top ?? 0;
+      const bottom = top + (s.height ?? 0);
+      if (top < headerTopBound || (bottom > 0 && bottom < headerTopBound)) {
+        header.push({ bottom });
+      } else if (bottom > footerBotBound) {
+        footer.push({ top });
+      }
+    }
+  } catch (e) {}
+
+  /* Sort audit images by numeric name order → stable across z-order */
   auditImages.sort((a, b) => auditImageIndex(a.name) - auditImageIndex(b.name));
 
   const headerBottom = header.length
@@ -100,21 +134,23 @@ function scanSlide(slide, slideW, slideH, slideIndex) {
     ? Math.min(...footer.map((f) => f.top))
     : slideH * CFG.FALLBACK_FOOTER_FRAC;
 
-  /* ★ Merge with the local tracking DB */
+  /* ★ Merge with the local tracking DB (helpers.js) */
   let effectiveCount = auditImages.length;
   let phantomCount = 0;
   try {
     if (window.AuditHelpers && typeof window.AuditHelpers.mergeImageViews === 'function') {
       const merged = window.AuditHelpers.mergeImageViews(auditImages, slideIndex || 0);
-      effectiveCount = merged.effectiveCount;
+      effectiveCount = Math.max(auditImages.length, merged.effectiveCount);
       phantomCount = merged.phantomCount;
-      if (phantomCount > 0) {
-        console.log(
-          `[AuditCapture:helpers] ${phantomCount} phantom image(s) recovered`
-        );
-      }
+      console.log(
+        `[AuditCapture:helpers] slide ${slideIndex} — live=${merged.liveCount} tracked=${merged.trackedCount} phantom=${phantomCount} → effective=${effectiveCount}`
+      );
+    } else {
+      console.warn('[AuditCapture:helpers] AuditHelpers not loaded — using live count only');
     }
-  } catch (e) {}
+  } catch (e) {
+    console.warn('[AuditCapture:helpers] merge failed:', e.message);
+  }
 
   return { headerBottom, footerTop, auditImages, closed, effectiveCount, phantomCount };
 }
@@ -284,13 +320,21 @@ async function runPlacement(dataUrl, mode) {
           log(`Nouvelle slide : ${slides.items.length}`);
         }
 
-        const effectiveExisting = Math.max(scan.auditImages.length, scan.effectiveCount || 0);
+        /* Fallback chain for existing count */
+        let effectiveExisting = scan.auditImages.length;
+        try {
+          if (window.AuditHelpers && typeof window.AuditHelpers.getTrackedImages === 'function') {
+            const tracked = window.AuditHelpers.getTrackedImages(slides.items.length);
+            effectiveExisting = Math.max(effectiveExisting, tracked.length, scan.effectiveCount || 0);
+          }
+        } catch (e) {}
         totalAfter = effectiveExisting + 1;
         currentSlideIndex = slides.items.length;
+        log(`Placement : ${effectiveExisting} image(s) détectée(s) → slot ${totalAfter}`);
 
         const slots = computeGrid(scan, totalAfter, slideW, slideH);
         slotForNew = slots[totalAfter - 1];
-        log(`Grille : ${totalAfter} slot(s), largeur ${slots[0].w.toFixed(0)}`);
+        log(`Grille : ${totalAfter} slot(s), largeur ${slots[0].w.toFixed(0)}, hauteur ${slots[0].h.toFixed(0)}`);
 
         for (let i = 0; i < scan.auditImages.length; i++) {
           const img = scan.auditImages[i];
@@ -323,8 +367,26 @@ async function runPlacement(dataUrl, mode) {
     throw new Error('Insertion par collage échouée');
   }
 
+  /* ★ Record in the local tracker IMMEDIATELY after paste succeeds —
+       even if positioning later fails, the next send will know this
+       image exists. */
+  try {
+    if (window.AuditHelpers && typeof window.AuditHelpers.recordPlacedImage === 'function') {
+      window.AuditHelpers.recordPlacedImage(
+        currentSlideIndex || 0,
+        `${CFG.NAMESPACE}${totalAfter}`,
+        { slotIndex: totalAfter }
+      );
+      log(`★ Enregistré dans le tracker : audit-img-${totalAfter} sur slide ${currentSlideIndex}`);
+    } else {
+      log('⚠️ AuditHelpers non chargé — pas de tracking', 'err');
+    }
+  } catch (e) {
+    log('⚠️ Tracker error : ' + e.message, 'err');
+  }
+
   /* ─── STEP 3: name & position — 2 attempts × 6 s ─── */
-  await new Promise((r) => setTimeout(r, 800));
+  await new Promise((r) => setTimeout(r, 1500));
 
   const localIndex = totalAfter;
   const localSlot = slotForNew;
@@ -365,17 +427,6 @@ async function runPlacement(dataUrl, mode) {
 
         await context.sync();
 
-        /* Record in tracking DB */
-        try {
-          if (window.AuditHelpers && typeof window.AuditHelpers.recordPlacedImage === 'function') {
-            window.AuditHelpers.recordPlacedImage(
-              slides.items.length,
-              `${CFG.NAMESPACE}${index}`,
-              { slotIndex: index, w: fitted.w, h: fitted.h }
-            );
-          }
-        } catch (e) {}
-
         if (localMode === 'end') {
           try {
             const marker = lastSlide.shapes.addTextBox(' ');
@@ -406,19 +457,7 @@ async function runPlacement(dataUrl, mode) {
     if (pos.ok) {
       log(`✅ Image ${localIndex} placée (retry) — slot ${localIndex}/${CFG.MAX_PER_ROW}`, 'ok');
     } else {
-      log(`⚠️ Positionnement 2 échoué : ${pos.reason}`, 'err');
-      /* ★ Even if Office.js can't tag the shape, record it in the
-           local DB so the next placement doesn't stack on slot 1. */
-      try {
-        if (window.AuditHelpers && typeof window.AuditHelpers.recordPlacedImage === 'function') {
-          window.AuditHelpers.recordPlacedImage(
-            localSlideIndex || 0,
-            `${CFG.NAMESPACE}${localIndex}`,
-            { slotIndex: localIndex, w: localDims.w, h: localDims.h }
-          );
-          log('   ↪ Image enregistrée dans le tracker local (Office.js ne l\'a pas vue)');
-        }
-      } catch (e) {}
+      log(`⚠️ Positionnement 2 échoué : ${pos.reason} — l'image reste visible mais non taguée`, 'err');
     }
   }
 

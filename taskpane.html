@@ -25,6 +25,20 @@
     }
     .status.ok { border-color: #22c55e; background: #052e16; }
     .status.err { border-color: #ef4444; background: #450a0a; }
+    .preflight {
+      padding: 8px 10px;
+      background: #0c2a3d;
+      border-radius: 6px;
+      margin: 8px 0;
+      font-size: 12px;
+      border-left: 3px solid #38bdf8;
+      color: #bae6fd;
+    }
+    .preflight.warn {
+      background: #3d2a0c;
+      border-color: #f59e0b;
+      color: #fde68a;
+    }
     .stats {
       padding: 8px 10px;
       background: #1e293b;
@@ -61,17 +75,16 @@
       margin-top: 8px;
     }
     button:hover { background: #1d4ed8; }
-    .hint {
-      font-size: 11px;
-      color: #64748b;
-      margin-top: 8px;
-      line-height: 1.4;
-    }
+    button.secondary { background: #374151; }
+    button.secondary:hover { background: #4b5563; }
   </style>
 </head>
 <body>
   <h1>📸 Audit Capture</h1>
   <div class="status" id="status">En attente de l'extension…</div>
+
+  <!-- ⭐ Pre-flight hint — shows where the next image will go -->
+  <div class="preflight" id="preflight" style="display:none;">—</div>
 
   <div class="stats">
     Slide actuelle : <span id="currentSlide">-</span> ·
@@ -80,11 +93,13 @@
   </div>
 
   <button id="reset">Réinitialiser la session</button>
+  <button id="refresh" class="secondary">🔄 Rafraîchir l'état de la slide</button>
 
   <div class="log" id="log"></div>
 
-  <script src="helpers.js?v=1"></script>
-  <script src="placement.js?v=6"></script>
-  <script src="taskpane.js?v=6"></script>
+  <script src="helpers.js?v=2"></script>
+  <script src="query.js?v=1"></script>
+  <script src="placement.js?v=9"></script>
+  <script src="taskpane.js?v=9"></script>
 </body>
 </html>
