@@ -1,7 +1,16 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v3.3
+   Audit Capture — PowerPoint Add-in v3.4
    ================================================================
    This is the boot file. All placement logic lives in placement.js.
+
+   v3.4 changes:
+     - Removed post-placement refreshStats() call (was triggering
+       Office.js unmount when it failed after a bad placement).
+     - Logged refreshStats errors instead of swallowing them.
+     - Reduced watchdog from 15 s to 8 s so Office.js doesn't
+       consider the Add-in unresponsive.
+     - Two refreshStats calls at boot (1500 ms, 3000 ms) so the
+       Add-in has time to read slides on slower tenants.
    ================================================================ */
 
 const state = {
@@ -55,10 +64,13 @@ Office.onReady((info) => {
   }
 
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
-  log('Add-in v3.3 démarré');
+  log('Add-in v3.4 démarré');
 
   listenForImages();
-  setTimeout(refreshStats, 500);
+
+  /* Two delayed attempts — gives Office.js time to init */
+  setTimeout(refreshStats, 1500);
+  setTimeout(refreshStats, 3000);
 });
 
 /* ================================================================
@@ -97,7 +109,7 @@ function listenForImages() {
 }
 
 /* ================================================================
-   placeImage wrapper with 15s watchdog
+   placeImage wrapper with 8s watchdog
 ================================================================ */
 async function placeImage(dataUrl, mode) {
   try {
@@ -105,13 +117,13 @@ async function placeImage(dataUrl, mode) {
 
     const watchdog = new Promise((_, reject) =>
       setTimeout(
-        () => reject(new Error('Timeout — Office.js ne répond pas (15 s)')),
-        15000
+        () => reject(new Error('Timeout — Office.js ne répond pas (8 s)')),
+        8000
       )
     );
 
     await Promise.race([runPlacement(dataUrl, mode), watchdog]);
-    refreshStats();
+    /* No post-placement refreshStats — it was killing the Add-in. */
   } catch (err) {
     console.error(err);
     log('❌ Erreur : ' + err.message, 'err');
@@ -142,7 +154,9 @@ async function refreshStats() {
 
       updateStats(slides.items.length, imgs);
     });
-  } catch (e) {}
+  } catch (e) {
+    console.warn('[AuditCapture:addin] refreshStats failed:', e.message || e);
+  }
 }
 
 /* ================================================================
