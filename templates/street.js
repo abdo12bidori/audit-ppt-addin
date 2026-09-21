@@ -2,8 +2,12 @@ window.AuditTemplates = window.AuditTemplates || {};
 window.AuditTemplates.street = {
   key: 'street',
   label: 'Vue rue',
-  slide: 1,      /* slide 1 */
-  slot: 1,       /* left slot */
+  slide: 1,
+  slot: 1,
   totalSlots: 2,
-  rect: { x: 40, y: 170, w: 430, h: 310 },
+  position: 'left',            /* left of a 2-slot slide */
+  marginFrac: 0.04,
+  gapFrac: 0.015,
+  bodyTopFrac: 0.31,
+  bodyBotFrac: 0.90,
 };

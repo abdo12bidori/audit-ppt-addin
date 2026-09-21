@@ -3,7 +3,11 @@ window.AuditTemplates.obione = {
   key: 'obione',
   label: 'Obione',
   slide: 1,
-  slot: 2,       /* right slot */
+  slot: 2,
   totalSlots: 2,
-  rect: { x: 490, y: 170, w: 430, h: 310 },
+  position: 'right',
+  marginFrac: 0.04,
+  gapFrac: 0.015,
+  bodyTopFrac: 0.31,
+  bodyBotFrac: 0.90,
 };

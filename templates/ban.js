@@ -5,5 +5,9 @@ window.AuditTemplates.ban = {
   slide: 2,
   slot: 4,
   totalSlots: 2,
-  rect: { x: 490, y: 170, w: 430, h: 310 },
+  position: 'right',
+  marginFrac: 0.04,
+  gapFrac: 0.015,
+  bodyTopFrac: 0.31,
+  bodyBotFrac: 0.90,
 };
