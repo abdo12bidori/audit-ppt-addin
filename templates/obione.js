@@ -1,15 +1,15 @@
 /* ================================================================
-   Template: BAN
-   Slide 2 — Slot 2 (top-right)
+   Template: Obione
+   Slide 1 — Slot 2 (top-right)
 ================================================================ */
 window.AuditTemplates = window.AuditTemplates || {};
 
-window.AuditTemplates.ban = {
-  key: 'ban',
-  label: 'BAN',
-  slide: 2,
+window.AuditTemplates.obione = {
+  key: 'obione',
+  label: 'Obione',
+  slide: 1,
   slot: 2,
   totalSlots: 2,
   rect: { x: 490, y: 170, w: 430, h: 310 },
-  caption: 'BAN',
+  caption: 'Obione',
 };
