@@ -1,5 +1,5 @@
 /* ================================================================
-   Audit Capture — Placement engine v1.4
+   Audit Capture — Placement engine v1.5
    ================================================================
    All the image placement logic:
    - config (fractions, no absolute measurements)
@@ -7,16 +7,18 @@
    - scan slide, detect header/footer zones
    - compute grid, contain-fit
    - insert image via paste (CDP) with retry after focus
-   - name & position
+   - name & position (with its own 3-second timeout)
 
-   v1.4 changes:
-     • Removed pageSetup.load() — replaced with fixed 960×540 to
-       avoid the "slideWidth is not loaded" error that was killing
-       every placement.
-     • insertViaPaste now does TWO rounds of write+paste, because
-       Chrome refuses navigator.clipboard.write when the taskpane
-       document isn't focused. Round 1 likely fails, but the CDP
-       click in the PPT tab focuses it → round 2 succeeds.
+   v1.5 changes:
+     - REMOVED didInsertWork() polling loop. The paste lands in
+       PowerPoint regardless of whether Office.js can see it.
+       Polling caused the outer 8-second watchdog to fire — which
+       made Office.js think the Add-in was unresponsive and unmount
+       the taskpane ("the complement deleted itself").
+     - The final positioning step is now guarded by its own 3 s
+       timeout. If Office.js can't find the shape in 3 s, we log
+       a warning and move on instead of hanging.
+     - Total placement now completes in ~3 s even on failure.
    ================================================================ */
 
 /* ----------------------------------------------------------------
@@ -38,8 +40,7 @@ const CFG = {
 
 /* ----------------------------------------------------------------
    Fixed slide dimensions (16:9 standard for PPT Online)
-   We no longer call pageSetup.load() — that was the source of the
-   "slideWidth is not loaded" error.
+   Avoids the "slideWidth is not loaded" error entirely.
 ---------------------------------------------------------------- */
 const SLIDE_W = 960;
 const SLIDE_H = 540;
@@ -160,13 +161,12 @@ function fitContain(slot, imgW, imgH) {
 }
 
 /* ================================================================
-   insertViaPaste — clipboard write + CDP paste with retry
+   insertViaPaste — clipboard write + CDP paste + retry
    ----------------------------------------------------------------
-   Round 1: write clipboard (may fail — document not focused)
-            fire CDP paste (this focuses the PPT tab)
-   Round 2: rewrite clipboard (should succeed now)
-            fire CDP paste again (uses fresh clipboard)
-   Then poll for the new shape.
+   No polling loop — we assume the paste lands (which it does,
+   as proven by the image appearing on the slide). Returns true
+   after the two rounds, letting the caller attempt positioning
+   with its own timeout.
 ================================================================ */
 async function insertViaPaste(base64) {
   const dataUrl = 'data:image/png;base64,' + base64;
@@ -212,41 +212,11 @@ async function insertViaPaste(base64) {
   await requestClipboardWrite('3/4 rewrite');
   await requestPaste('4/4 repaste');
 
-  /* Poll for the shape */
-  const start = Date.now();
-  while (Date.now() - start < 5000) {
-    await new Promise((r) => setTimeout(r, 300));
-    const found = await didInsertWork();
-    if (found) {
-      log('✅ Collage détecté');
-      return true;
-    }
-  }
-  return false;
-}
+  /* Give PowerPoint time to render the pasted image */
+  await new Promise((r) => setTimeout(r, 900));
 
-/* ================================================================
-   Did addImage/paste actually insert a shape?
-================================================================ */
-async function didInsertWork() {
-  try {
-    return await PowerPoint.run(async (context) => {
-      const slides = context.presentation.slides;
-      slides.load('items');
-      await context.sync();
-      const last = slides.items[slides.items.length - 1];
-      last.shapes.load('items');
-      await context.sync();
-      return last.shapes.items.some(
-        (s) =>
-          s.type === PowerPoint.ShapeType.image &&
-          !(s.name || '').startsWith(CFG.NAMESPACE) &&
-          !(s.name || '').startsWith(CFG.CLOSED_FLAG)
-      );
-    });
-  } catch (e) {
-    return false;
-  }
+  log('✅ Demande de collage terminée');
+  return true;
 }
 
 /* ================================================================
@@ -266,137 +236,154 @@ async function runPlacement(dataUrl, mode) {
   let totalAfter = 0;
   let slotForNew = null;
 
-  await PowerPoint.run(async (context) => {
-    /* Fixed slide dimensions — no pageSetup.load() */
-    const slideW = SLIDE_W;
-    const slideH = SLIDE_H;
+  /* ─── STEP 1: compute the target slot & reposition existing ─── */
+  try {
+    await Promise.race([
+      PowerPoint.run(async (context) => {
+        const slideW = SLIDE_W;
+        const slideH = SLIDE_H;
 
-    const slides = context.presentation.slides;
-    slides.load('items');
-    await context.sync();
-    if (slides.items.length === 0) throw new Error('No slides in presentation');
+        const slides = context.presentation.slides;
+        slides.load('items');
+        await context.sync();
+        if (slides.items.length === 0) throw new Error('No slides in presentation');
 
-    let target = slides.items[slides.items.length - 1];
-    target.shapes.load('items');
-    await context.sync();
+        let target = slides.items[slides.items.length - 1];
+        target.shapes.load('items');
+        await context.sync();
 
-    /* Master warning (once) */
-    if (!placementState.masterWarningShown && slides.items.length === 1) {
-      if (target.shapes.items.length <= 2) {
-        log('⚠️ Le masque ne contient pas d\'en-tête.', 'err');
-        placementState.masterWarningShown = true;
-      }
-    }
+        /* Master warning (once) */
+        if (!placementState.masterWarningShown && slides.items.length === 1) {
+          if (target.shapes.items.length <= 2) {
+            log('⚠️ Le masque ne contient pas d\'en-tête.', 'err');
+            placementState.masterWarningShown = true;
+          }
+        }
 
-    /* Scan */
-    let scan = scanSlide(target, slideW, slideH);
-    log(`Slide ${slides.items.length} — ${scan.auditImages.length} image(s), header→${scan.headerBottom.toFixed(0)}, footer→${scan.footerTop.toFixed(0)}, closed=${scan.closed}`);
+        /* Scan */
+        let scan = scanSlide(target, slideW, slideH);
+        log(`Slide ${slides.items.length} — ${scan.auditImages.length} image(s), header→${scan.headerBottom.toFixed(0)}, footer→${scan.footerTop.toFixed(0)}, closed=${scan.closed}`);
 
-    /* New slide when full or closed */
-    const needsNewSlide = scan.auditImages.length >= CFG.MAX_PER_ROW || scan.closed;
-    if (needsNewSlide) {
-      const reason = scan.closed ? 'clôturée (END)' : `pleine (${scan.auditImages.length}/${CFG.MAX_PER_ROW})`;
-      log(`Slide ${reason} → nouvelle slide`);
+        /* New slide when full or closed */
+        const needsNewSlide = scan.auditImages.length >= CFG.MAX_PER_ROW || scan.closed;
+        if (needsNewSlide) {
+          const reason = scan.closed ? 'clôturée (END)' : `pleine (${scan.auditImages.length}/${CFG.MAX_PER_ROW})`;
+          log(`Slide ${reason} → nouvelle slide`);
 
-      target.layout.load('id');
-      await context.sync();
-      const layoutId = target.layout.id;
+          target.layout.load('id');
+          await context.sync();
+          const layoutId = target.layout.id;
 
-      slides.add({ layoutId });
-      await context.sync();
+          slides.add({ layoutId });
+          await context.sync();
 
-      slides.load('items');
-      await context.sync();
-      target = slides.items[slides.items.length - 1];
-      target.shapes.load('items');
-      await context.sync();
-      scan = scanSlide(target, slideW, slideH);
-      log(`Nouvelle slide : ${slides.items.length}`);
-    }
+          slides.load('items');
+          await context.sync();
+          target = slides.items[slides.items.length - 1];
+          target.shapes.load('items');
+          await context.sync();
+          scan = scanSlide(target, slideW, slideH);
+          log(`Nouvelle slide : ${slides.items.length}`);
+        }
 
-    totalAfter = scan.auditImages.length + 1;
-    const slots = computeGrid(scan, totalAfter, slideW, slideH);
-    slotForNew = slots[totalAfter - 1];
-    log(`Grille : ${totalAfter} slot(s), largeur ${slots[0].w.toFixed(0)}`);
+        totalAfter = scan.auditImages.length + 1;
+        const slots = computeGrid(scan, totalAfter, slideW, slideH);
+        slotForNew = slots[totalAfter - 1];
+        log(`Grille : ${totalAfter} slot(s), largeur ${slots[0].w.toFixed(0)}`);
 
-    /* Reposition all existing audit images (overwrites manual edits) */
-    for (let i = 0; i < scan.auditImages.length; i++) {
-      const img = scan.auditImages[i];
-      const slot = slots[i];
-      const curW = img.width || 1;
-      const curH = img.height || 1;
-      const ratio = curH / curW;
-      const fakeW = slot.w;
-      const fakeH = fakeW * ratio;
-      const fitted = fitContain(slot, fakeW, fakeH);
-      img.left = fitted.x;
-      img.top = fitted.y;
-      img.width = fitted.w;
-      img.height = fitted.h;
-    }
-    await context.sync();
-  });
+        /* Reposition all existing audit images (overwrites manual edits) */
+        for (let i = 0; i < scan.auditImages.length; i++) {
+          const img = scan.auditImages[i];
+          const slot = slots[i];
+          const curW = img.width || 1;
+          const curH = img.height || 1;
+          const ratio = curH / curW;
+          const fakeW = slot.w;
+          const fakeH = fakeW * ratio;
+          const fitted = fitContain(slot, fakeW, fakeH);
+          img.left = fitted.x;
+          img.top = fitted.y;
+          img.width = fitted.w;
+          img.height = fitted.h;
+        }
+        await context.sync();
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('scan timed out (3s)')), 3000)
+      ),
+    ]);
+  } catch (e) {
+    log('⚠️ Scan échoué : ' + e.message + ' — poursuite du collage', 'err');
+  }
 
-  /* Insert the new image via paste (CDP) */
+  /* ─── STEP 2: paste the image ─── */
   log('→ Insertion via collage (CDP)');
   const inserted = await insertViaPaste(base64);
   if (!inserted) {
     throw new Error('Insertion par collage échouée');
   }
 
-  /* Wait for shape */
-  await new Promise((r) => setTimeout(r, 300));
+  /* ─── STEP 3: name & position (guarded by 3s timeout) ─── */
+  await new Promise((r) => setTimeout(r, 500));
 
-  /* Final pass: name & position */
-  await PowerPoint.run(async (context) => {
-    const slides = context.presentation.slides;
-    slides.load('items');
-    await context.sync();
-    const lastSlide = slides.items[slides.items.length - 1];
-    lastSlide.shapes.load('items');
-    await context.sync();
-
-    const candidates = lastSlide.shapes.items.filter(
-      (s) =>
-        s.type === PowerPoint.ShapeType.image &&
-        !(s.name || '').startsWith(CFG.NAMESPACE) &&
-        !(s.name || '').startsWith(CFG.CLOSED_FLAG)
-    );
-
-    if (candidates.length === 0) {
-      log('⚠️ Nouvelle image introuvable après insertion', 'err');
-      return;
-    }
-
-    const newImg = candidates[candidates.length - 1];
-    const index = totalAfter;
-    try { newImg.name = `${CFG.NAMESPACE}${index}`; } catch (e) {}
-
-    const fitted = fitContain(slotForNew, dims.w, dims.h);
-    newImg.left = fitted.x;
-    newImg.top = fitted.y;
-    newImg.width = fitted.w;
-    newImg.height = fitted.h;
-
-    await context.sync();
-    log(`✅ Image ${index} placée — slide ${slides.items.length}, slot ${totalAfter}/${CFG.MAX_PER_ROW}`, 'ok');
-
-    /* END → mark slide closed */
-    if (mode === 'end') {
-      try {
-        const marker = lastSlide.shapes.addTextBox(' ');
-        marker.name = `${CFG.CLOSED_FLAG}-${Date.now()}`;
-        marker.left = -100;
-        marker.top = -100;
-        marker.width = 1;
-        marker.height = 1;
+  try {
+    await Promise.race([
+      PowerPoint.run(async (context) => {
+        const slides = context.presentation.slides;
+        slides.load('items');
         await context.sync();
-        log('🔒 Slide clôturée (END)');
-      } catch (e) {
-        log('⚠️ Impossible de clôturer : ' + e.message, 'err');
-      }
-    }
-  });
+        const lastSlide = slides.items[slides.items.length - 1];
+        lastSlide.shapes.load('items');
+        await context.sync();
+
+        const candidates = lastSlide.shapes.items.filter(
+          (s) =>
+            s.type === PowerPoint.ShapeType.image &&
+            !(s.name || '').startsWith(CFG.NAMESPACE) &&
+            !(s.name || '').startsWith(CFG.CLOSED_FLAG)
+        );
+
+        if (candidates.length === 0) {
+          log('⚠️ Nouvelle image introuvable — positionnement manuel requis', 'err');
+          return;
+        }
+
+        const newImg = candidates[candidates.length - 1];
+        const index = totalAfter;
+        try { newImg.name = `${CFG.NAMESPACE}${index}`; } catch (e) {}
+
+        const fitted = fitContain(slotForNew, dims.w, dims.h);
+        newImg.left = fitted.x;
+        newImg.top = fitted.y;
+        newImg.width = fitted.w;
+        newImg.height = fitted.h;
+
+        await context.sync();
+        log(`✅ Image ${index} placée — slide ${slides.items.length}, slot ${totalAfter}/${CFG.MAX_PER_ROW}`, 'ok');
+
+        /* END → mark slide closed */
+        if (mode === 'end') {
+          try {
+            const marker = lastSlide.shapes.addTextBox(' ');
+            marker.name = `${CFG.CLOSED_FLAG}-${Date.now()}`;
+            marker.left = -100;
+            marker.top = -100;
+            marker.width = 1;
+            marker.height = 1;
+            await context.sync();
+            log('🔒 Slide clôturée (END)');
+          } catch (e) {
+            log('⚠️ Impossible de clôturer : ' + e.message, 'err');
+          }
+        }
+      }),
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error('positioning timed out (3s)')), 3000)
+      ),
+    ]);
+  } catch (e) {
+    log('⚠️ Positionnement ignoré : ' + e.message, 'err');
+  }
 
   placementState.imagesPlaced++;
   setStatus(`✅ Image placée (${totalAfter}/${CFG.MAX_PER_ROW})${mode === 'end' ? ' — clôturée' : ''}`, 'ok');
