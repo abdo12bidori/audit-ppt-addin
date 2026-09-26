@@ -1,33 +1,38 @@
 /* ================================================================
-   Audit Capture — Templates Index
-   ================================================================
-   Registers all image-type templates. To add a new type later:
-     1. Create templates/<yourtype>.js
-     2. Add one line below: require via window.AuditTemplates.<key>
-   That's it — the placement engine is fully generic.
+   Templates index — 4 categories
 ================================================================ */
-
 window.AuditTemplates = window.AuditTemplates || {};
 
-/* Each template file self-registers on window.AuditTemplates.
-   The order of these <script> tags in taskpane.html defines the
-   order of the dropdown in the extension. */
+window.AuditTemplatesList = ['street', 'obione', 'onb', 'ban'];
 
-window.AuditTemplatesList = [
-  'street',
-  'obione',
-  'onb',
-  'ban',
-];
-
-/* Helper: get list of templates as an array */
 window.AuditTemplates.getList = function () {
   return window.AuditTemplatesList
-    .map((key) => window.AuditTemplates[key])
+    .map((k) => window.AuditTemplates[k])
     .filter(Boolean);
 };
 
-/* Helper: get one template by key */
 window.AuditTemplates.get = function (key) {
   return window.AuditTemplates[key] || null;
+};
+
+/* Detect the variant from the image aspect ratio */
+window.AuditTemplates.detectVariant = function (categoryKey, imgW, imgH) {
+  const tpl = window.AuditTemplates[categoryKey];
+  if (!tpl || !tpl.variants || tpl.variants.length === 0) return null;
+
+  const aspect = imgW / imgH;
+
+  for (const v of tpl.variants) {
+    if (aspect >= v.minAspect && aspect <= v.maxAspect) return v;
+  }
+
+  /* No match — pick the closest variant by midpoint */
+  let best = tpl.variants[0];
+  let bestDist = Infinity;
+  for (const v of tpl.variants) {
+    const mid = (v.minAspect + v.maxAspect) / 2;
+    const d = Math.abs(aspect - mid);
+    if (d < bestDist) { bestDist = d; best = v; }
+  }
+  return best;
 };
