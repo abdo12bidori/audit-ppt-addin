@@ -1,6 +1,3 @@
-/* ================================================================
-   Templates index — 4 categories
-================================================================ */
 window.AuditTemplates = window.AuditTemplates || {};
 
 window.AuditTemplatesList = ['street', 'obione', 'onb', 'ban'];
