@@ -101,3 +101,42 @@ if (typeof notify !== 'function') {
     } catch (e) {}
   };
 }
+window.__measureSlots = async function () {
+  return await PowerPoint.run(async (context) => {
+    const slides = context.presentation.slides;
+    slides.load('items');
+    await context.sync();
+
+    const slide = slides.items[0];   // slide 1
+    slide.shapes.load('items');
+    await context.sync();
+
+    const shapes = slide.shapes.items;
+    const result = [];
+
+    for (let i = 0; i < shapes.length; i++) {
+      const s = shapes[i];
+      let text = '';
+      try {
+        if (s.type === PowerPoint.ShapeType.textBox ||
+            s.type === PowerPoint.ShapeType.geometricShape) {
+          s.textFrame.load('textRange/text');
+        }
+      } catch (e) {}
+      try { await context.sync(); } catch (e) {}
+      try { text = (s.textFrame?.textRange?.text || '').substring(0, 40); } catch (e) {}
+
+      result.push({
+        index: i,
+        name: s.name || '(unnamed)',
+        type: s.type,
+        left: Math.round(s.left ?? 0),
+        top: Math.round(s.top ?? 0),
+        width: Math.round(s.width ?? 0),
+        height: Math.round(s.height ?? 0),
+        text: text,
+      });
+    }
+    return result;
+  });
+};
