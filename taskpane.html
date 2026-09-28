@@ -55,13 +55,23 @@
 
   <div class="log" id="log"></div>
 
-  <script src="templates/street.js?v=3"></script>
-  <script src="templates/obione.js?v=3"></script>
-  <script src="templates/onb.js?v=3"></script>
-  <script src="templates/ban.js?v=3"></script>
-  <script src="templates/index.js?v=3"></script>
+  <!-- Templates -->
+  <script src="templates/street.js?v=5"></script>
+  <script src="templates/obione.js?v=5"></script>
+  <script src="templates/onb.js?v=5"></script>
+  <script src="templates/ban.js?v=5"></script>
+  <script src="templates/index.js?v=5"></script>
 
-  <script src="placement.js?v=22"></script>
-  <script src="taskpane.js?v=23"></script>
+  <!-- Placement modules (order matters) -->
+  <script src="placement/config.js?v=5"></script>
+  <script src="placement/image.js?v=5"></script>
+  <script src="placement/paste.js?v=5"></script>
+  <script src="placement/slots.js?v=5"></script>
+  <script src="placement/position.js?v=5"></script>
+  <script src="placement/process.js?v=5"></script>
+  <script src="placement/queue.js?v=5"></script>
+
+  <!-- UI -->
+  <script src="taskpane.js?v=5"></script>
 </body>
 </html>

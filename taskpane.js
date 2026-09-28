@@ -1,9 +1,7 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v5.3
+   Audit Capture — PowerPoint Add-in v6.0
    ----------------------------------------------------------------
-   v5.3: adds "📐 Mesurer les formes" button — dumps every shape's
-         position and size so the slot coordinates can be read
-         directly from the taskpane (no console needed).
+   UI only. All placement logic lives in placement/*.js.
 ================================================================ */
 
 const state = { imagesPlaced: 0 };
@@ -40,22 +38,22 @@ Office.onReady((info) => {
   }
 
   const templates = window.AuditTemplates.getList();
-  log(`Add-in v5.3 démarré — ${templates.length} catégorie(s) : ${templates.map(t => t.label).join(', ')}`);
+  log(`Add-in v6.0 démarré — ${templates.length} catégorie(s) : ${templates.map(t => t.label).join(', ')}`);
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
 
-  /* Listen for images */
+  /* Listen for images from the extension */
   window.addEventListener('message', (e) => {
     if (!e.data || e.data.type !== 'AUDIT_ADD_IMAGE') return;
     const mode = e.data.mode || 'normal';
     const templateKey = e.data.template || 'street';
     log(`Image reçue (template=${templateKey}, mode=${mode})`);
-    enqueueImage(e.data.dataUrl, templateKey);
+    window.AuditPlacement.enqueueImage(e.data.dataUrl, templateKey);
   });
 
   /* Direct call */
   window.__auditPlaceImage = (dataUrl, templateKey) => {
     log(`Image reçue (direct, template=${templateKey || 'street'})`);
-    enqueueImage(dataUrl, templateKey || 'street');
+    window.AuditPlacement.enqueueImage(dataUrl, templateKey || 'street');
   };
 
   /* Query API */
@@ -89,8 +87,8 @@ const resetBtn = document.getElementById('reset');
 if (resetBtn) {
   resetBtn.addEventListener('click', () => {
     state.imagesPlaced = 0;
-    if (typeof placementState !== 'undefined' && placementState) {
-      placementState.imagesPlaced = 0;
+    if (window.AuditPlacement && window.AuditPlacement.state) {
+      window.AuditPlacement.state.imagesPlaced = 0;
     }
     updateStats('-', 0);
     log('Session réinitialisée');
@@ -151,7 +149,6 @@ if (measureBtn && measureOut) {
         return out;
       });
 
-      /* Format as text */
       let txt = `Total: ${result.length} formes\n\n`;
       txt += 'slide | idx | name                     | type | left | top  | w    | h\n';
       txt += '------+-----+--------------------------+------+------+------+------+------\n';
@@ -173,63 +170,4 @@ if (measureBtn && measureOut) {
       log('❌ Mesure échouée : ' + (e.message || e), 'err');
     }
   });
-}
-
-/* ================================================================
-   Legacy measure function (still callable from console if needed)
-================================================================ */
-window.__measureSlots = async function () {
-  return await PowerPoint.run(async (context) => {
-    const slides = context.presentation.slides;
-    slides.load('items');
-    await context.sync();
-
-    const slide = slides.items[0];
-    slide.shapes.load('items');
-    await context.sync();
-
-    const shapes = slide.shapes.items;
-    const result = [];
-
-    for (let i = 0; i < shapes.length; i++) {
-      const s = shapes[i];
-      let text = '';
-      try {
-        if (s.type === PowerPoint.ShapeType.textBox ||
-            s.type === PowerPoint.ShapeType.geometricShape) {
-          s.textFrame.load('textRange/text');
-        }
-      } catch (e) {}
-      try { await context.sync(); } catch (e) {}
-      try { text = (s.textFrame?.textRange?.text || '').substring(0, 40); } catch (e) {}
-
-      result.push({
-        index: i,
-        name: s.name || '(unnamed)',
-        type: s.type,
-        left: Math.round(s.left ?? 0),
-        top: Math.round(s.top ?? 0),
-        width: Math.round(s.width ?? 0),
-        height: Math.round(s.height ?? 0),
-        text: text,
-      });
-    }
-    return result;
-  });
-};
-
-/* ================================================================
-   Notify helper (kept for compatibility)
-================================================================ */
-if (typeof notify !== 'function') {
-  window.notify = function (msg) {
-    try {
-      chrome.notifications && chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icon128.png',
-        title: 'Audit Capture',
-        message: msg,
-      });
-    } catch (e) {}
-  };
 }
