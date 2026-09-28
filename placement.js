@@ -1,31 +1,23 @@
 /* ================================================================
-   Placement engine v3.0
+   Placement engine v4.0
    ================================================================
-   - Queue: one image at a time
-   - Auto-detect variant from aspect ratio (for logging)
-   - Scan slides for a free slot (left or right)
-   - Wipe audit-img-* copies on duplicated slides
-   - Contain-fit inside slot (no distortion, no enlargement)
-   - Retry every 3s when all slides full
-   ================================================================ */
+   - Placeholders are shapes named IMG_SLOT_* on the slide
+     (drawn by the PPT author in the template)
+   - Add-in finds the first empty placeholder across all slides
+   - Deletes any existing image inside that placeholder
+   - Contain-fit inside the placeholder (no overflow)
+   - Queue serializes processing
+   - Retry every 3s when all placeholders are full
+================================================================ */
 
-const LAYOUT = {
-  SLIDE_W: 960,
-  SLIDE_H: 540,
-  SLOT_LEFT:  { x: 18,  y: 120, w: 376, h: 315 },
-  SLOT_RIGHT: { x: 401, y: 174, w: 338, h: 261 },
-  NAMESPACE: 'audit-img-',
-  MAX_PER_SLIDE: 2,
-  RETRY_MS: 3000,
-};
+const PLACEHOLDER_PREFIX = 'IMG_SLOT';
+const NAMESPACE = 'audit-img-';
+const RETRY_MS = 3000;
 
-const placementState = {
-  imagesPlaced: 0,
-  masterWarningShown: false,
-};
+const placementState = { imagesPlaced: 0 };
 
 /* ================================================================
-   Image decode
+   Decode image dimensions
 ================================================================ */
 function decodeImageDims(dataUrl) {
   return new Promise((resolve, reject) => {
@@ -37,11 +29,11 @@ function decodeImageDims(dataUrl) {
 }
 
 /* ================================================================
-   Contain-fit
+   Contain-fit — inside a slot rect
 ================================================================ */
 function containFit(slot, imgW, imgH) {
   let scale = Math.min(slot.w / imgW, slot.h / imgH);
-  if (scale > 1) scale = 1;              /* never enlarge */
+  if (scale > 1) scale = 1;   /* never enlarge */
   const w = imgW * scale;
   const h = imgH * scale;
   return {
@@ -53,142 +45,103 @@ function containFit(slot, imgW, imgH) {
 }
 
 /* ================================================================
-   insertViaPaste — clipboard write + CDP Ctrl+V
+   Insert via paste (clipboard + CDP Ctrl+V)
 ================================================================ */
 async function insertViaPaste(base64) {
   const dataUrl = 'data:image/png;base64,' + base64;
 
-  async function writeClipboard(label) {
+  const writeClipboard = async (label) => {
     try {
       window.parent.postMessage({ type: 'AUDIT_WRITE_CLIPBOARD', dataUrl, ts: Date.now() }, '*');
-      log(`→ [${label}] Demande d'écriture presse-papier`);
+      log(`→ [${label}] Écriture presse-papier`);
       await new Promise((r) => setTimeout(r, 500));
-      return true;
-    } catch (e) {
-      log(`⚠️ [${label}] ${e.message}`, 'err');
-      return false;
-    }
-  }
+    } catch (e) { log(`⚠️ ${label}: ${e.message}`, 'err'); }
+  };
 
-  async function pasteRequest(label) {
+  const pasteRequest = async (label) => {
     try {
       window.parent.postMessage({ type: 'AUDIT_PASTE_REQUEST', ts: Date.now() }, '*');
-      log(`→ [${label}] Demande de collage`);
-      return true;
-    } catch (e) {
-      log(`⚠️ [${label}] ${e.message}`, 'err');
-      return false;
-    }
-  }
+      log(`→ [${label}] Collage`);
+    } catch (e) { log(`⚠️ ${label}: ${e.message}`, 'err'); }
+  };
 
-  await writeClipboard('1/4 write');
-  await pasteRequest('2/4 paste');
+  await writeClipboard('1/4');
+  await pasteRequest('2/4');
   await new Promise((r) => setTimeout(r, 900));
-  await writeClipboard('3/4 rewrite');
-  await pasteRequest('4/4 repaste');
+  await writeClipboard('3/4');
+  await pasteRequest('4/4');
   await new Promise((r) => setTimeout(r, 900));
-
-  log('✅ Collage demandé');
   return true;
 }
 
 /* ================================================================
-   scanSlides — find the first free slot across all slides
+   Scan slides for the first empty placeholder
    ----------------------------------------------------------------
-   Returns { slideNumber, slot, rect, isDuplicated } or null.
-   'isDuplicated' means: this slide has audit-img-* copies from
-   the previous slide — they must be wiped before placing.
+   A placeholder is a shape whose name starts with 'IMG_SLOT'.
+   "Empty" means no audit-img-* image overlaps its rectangle.
+   Returns { slideNumber, rect, placeholderName } or null.
 ================================================================ */
-async function scanSlides() {
+async function findFirstEmptyPlaceholder() {
   return await PowerPoint.run(async (context) => {
     const slides = context.presentation.slides;
     slides.load('items');
     await context.sync();
 
-    /* Load all shapes for all slides */
-    for (const slide of slides.items) {
-      slide.shapes.load('items');
-    }
-    await context.sync();
-
-    /* Get audit image names per slide */
-    const slideAuditNames = [];
-    for (const slide of slides.items) {
-      const names = slide.shapes.items
-        .filter((s) => (s.name || '').startsWith(LAYOUT.NAMESPACE))
-        .map((s) => s.name);
-      slideAuditNames.push(names);
-    }
-
-    /* Scan slides in order, find first with a free slot */
     for (let i = 0; i < slides.items.length; i++) {
-      const names = slideAuditNames[i];
-      const prevNames = i > 0 ? slideAuditNames[i - 1] : [];
+      const slide = slides.items[i];
+      slide.shapes.load('items');
+      await context.sync();
 
-      /* Detect duplicate: current slide has ≥1 audit name that exists on previous slide */
-      const isDuplicated =
-        names.length > 0 &&
-        prevNames.some((n) => names.includes(n));
+      const shapes = slide.shapes.items;
+      const placeholders = shapes.filter(
+        (s) => (s.name || '').startsWith(PLACEHOLDER_PREFIX)
+      );
+      const images = shapes.filter((s) => s.type === PowerPoint.ShapeType.image);
 
-      if (isDuplicated) {
-        /* Wipe the copies — the slide will be usable */
-        return {
-          slideNumber: i + 1,
-          slot: 'left',
-          rect: LAYOUT.SLOT_LEFT,
-          isDuplicated: true,
+      for (const ph of placeholders) {
+        const rect = {
+          x: ph.left ?? 0,
+          y: ph.top ?? 0,
+          w: ph.width ?? 0,
+          h: ph.height ?? 0,
         };
-      }
+        if (rect.w < 50 || rect.h < 50) continue;
 
-      /* Count images overlapping left slot */
-      const leftTaken = imagesOverlapSlot(slides.items[i].shapes.items, LAYOUT.SLOT_LEFT);
-      if (!leftTaken) {
-        return {
-          slideNumber: i + 1,
-          slot: 'left',
-          rect: LAYOUT.SLOT_LEFT,
-          isDuplicated: false,
-        };
-      }
-
-      /* Count images overlapping right slot */
-      const rightTaken = imagesOverlapSlot(slides.items[i].shapes.items, LAYOUT.SLOT_RIGHT);
-      if (!rightTaken) {
-        return {
-          slideNumber: i + 1,
-          slot: 'right',
-          rect: LAYOUT.SLOT_RIGHT,
-          isDuplicated: false,
-        };
+        const overlap = imagesOverlapsRect(images, rect);
+        if (!overlap) {
+          return {
+            slideNumber: i + 1,
+            rect,
+            placeholderName: ph.name,
+          };
+        }
       }
     }
-
-    return null;   /* all slides full */
+    return null;
   });
 }
 
-function imagesOverlapSlot(shapes, slot) {
+function imagesOverlapsRect(images, rect) {
   const PAD = 5;
-  const sx1 = slot.x - PAD;
-  const sy1 = slot.y - PAD;
-  const sx2 = slot.x + slot.w + PAD;
-  const sy2 = slot.y + slot.h + PAD;
+  const rx1 = rect.x - PAD;
+  const ry1 = rect.y - PAD;
+  const rx2 = rect.x + rect.w + PAD;
+  const ry2 = rect.y + rect.h + PAD;
 
-  for (const s of shapes) {
-    if (!s || s.type !== PowerPoint.ShapeType.image) continue;
-    const l = s.left ?? 0;
-    const t = s.top ?? 0;
-    const r = l + (s.width ?? 0);
-    const b = t + (s.height ?? 0);
-    if (!(r < sx1 || l > sx2 || b < sy1 || t > sy2)) return true;
+  for (const img of images) {
+    const il = img.left ?? 0;
+    const it = img.top ?? 0;
+    const ir = il + (img.width ?? 0);
+    const ib = it + (img.height ?? 0);
+    if (!(ir < rx1 || il > rx2 || ib < ry1 || it > ry2)) return true;
   }
   return false;
 }
 
 /* ================================================================
-   wipeAuditImages — delete all audit-img-* from a slide
+   Wipe any existing image inside the target placeholder
 ================================================================ */
-async function wipeAuditImages(slideNumber) {
+async function wipeImagesInRect(slideNumber, rect) {
   try {
     return await PowerPoint.run(async (context) => {
       const slides = context.presentation.slides;
@@ -200,10 +153,22 @@ async function wipeAuditImages(slideNumber) {
       slide.shapes.load('items');
       await context.sync();
 
+      const PAD = 5;
+      const rx1 = rect.x - PAD;
+      const ry1 = rect.y - PAD;
+      const rx2 = rect.x + rect.w + PAD;
+      const ry2 = rect.y + rect.h + PAD;
+
       let deleted = 0;
       for (const s of slide.shapes.items) {
-        if (!s || !(s.name || '').startsWith(LAYOUT.NAMESPACE)) continue;
-        try { s.delete(); deleted++; } catch (e) {}
+        if (!s || s.type !== PowerPoint.ShapeType.image) continue;
+        const il = s.left ?? 0;
+        const it = s.top ?? 0;
+        const ir = il + (s.width ?? 0);
+        const ib = it + (s.height ?? 0);
+        if (!(ir < rx1 || il > rx2 || ib < ry1 || it > ry2)) {
+          try { s.delete(); deleted++; } catch (e) {}
+        }
       }
       if (deleted > 0) await context.sync();
       return { ok: true, deleted };
@@ -214,7 +179,24 @@ async function wipeAuditImages(slideNumber) {
 }
 
 /* ================================================================
-   positionNewImage — find the newest image on a slide and move it
+   Focus a slide
+================================================================ */
+async function focusSlide(slideNumber) {
+  try {
+    await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+      if (slides.items.length < slideNumber) return;
+      const target = slides.items[slideNumber - 1];
+      context.presentation.setSelectedSlides([target.id]);
+      await context.sync();
+    });
+  } catch (e) {}
+}
+
+/* ================================================================
+   Position the newest untagged image on the target slide
 ================================================================ */
 async function positionNewImage(slideNumber, fitted, templateKey) {
   try {
@@ -222,7 +204,7 @@ async function positionNewImage(slideNumber, fitted, templateKey) {
       const slides = context.presentation.slides;
       slides.load('items');
       await context.sync();
-      if (slides.items.length < slideNumber) return { ok: false, reason: 'slide missing' };
+      if (slides.items.length < slideNumber) return { ok: false };
 
       const slide = slides.items[slideNumber - 1];
       slide.shapes.load('items');
@@ -231,19 +213,18 @@ async function positionNewImage(slideNumber, fitted, templateKey) {
       const candidates = slide.shapes.items.filter(
         (s) =>
           s.type === PowerPoint.ShapeType.image &&
-          !(s.name || '').startsWith(LAYOUT.NAMESPACE)
+          !(s.name || '').startsWith(NAMESPACE)
       );
 
       if (candidates.length === 0) return { ok: false, reason: 'no new image' };
 
       const newImg = candidates[candidates.length - 1];
 
-      /* Delete any other untagged candidates (defensive) */
       for (let i = 0; i < candidates.length - 1; i++) {
         try { candidates[i].delete(); } catch (e) {}
       }
 
-      try { newImg.name = LAYOUT.NAMESPACE + templateKey; } catch (e) {}
+      try { newImg.name = NAMESPACE + templateKey; } catch (e) {}
 
       newImg.left = fitted.x;
       newImg.top = fitted.y;
@@ -259,81 +240,46 @@ async function positionNewImage(slideNumber, fitted, templateKey) {
 }
 
 /* ================================================================
-   focusSlide
-================================================================ */
-async function focusSlide(slideNumber) {
-  try {
-    await PowerPoint.run(async (context) => {
-      const slides = context.presentation.slides;
-      slides.load('items');
-      await context.sync();
-      if (slides.items.length < slideNumber) return;
-      const target = slides.items[slideNumber - 1];
-      context.presentation.setSelectedSlides([target.id]);
-      await context.sync();
-    });
-    return true;
-  } catch (e) {
-    return false;
-  }
-}
-
-/* ================================================================
-   Process one image (used by the queue)
+   Process one image
 ================================================================ */
 async function processOneImage(dataUrl, templateKey) {
   const tpl = window.AuditTemplates.get(templateKey);
   if (!tpl) throw new Error('Template inconnu : ' + templateKey);
 
-  /* 1. Decode */
   const dims = await decodeImageDims(dataUrl);
-  const aspect = dims.w / dims.h;
+  log(`Image : ${dims.w}×${dims.h} (${tpl.label})`);
 
-  /* 2. Detect variant (for logging) */
-  const variant = window.AuditTemplates.detectVariant(templateKey, dims.w, dims.h);
-  log(`Catégorie : ${tpl.label} | Variante détectée : ${variant ? variant.label : '—'} (aspect ${aspect.toFixed(2)})`);
-
-  /* 3. Find free slot */
-  const slot = await scanSlides();
+  const slot = await findFirstEmptyPlaceholder();
   if (!slot) {
-    log('⚠️ Toutes les diapositives sont pleines', 'err');
-    setStatus('⚠️ Diapositives pleines — dupliquez-en une', 'err');
-    notify('⚠️ Toutes les diapositives sont pleines — dupliquez-en une');
+    log('⚠️ Toutes les zones image sont pleines', 'err');
+    setStatus('⚠️ Zones pleines — dupliquez une slide', 'err');
     return { retry: true };
   }
 
-  log(`Slot trouvé : slide ${slot.slideNumber} (${slot.slot}), duplicated=${slot.isDuplicated}`);
+  log(`Zone libre : slide ${slot.slideNumber}, ${slot.placeholderName}`);
 
-  /* 4. If duplicated slide — wipe copies */
-  if (slot.isDuplicated) {
-    const w = await wipeAuditImages(slot.slideNumber);
-    if (w.ok && w.deleted > 0) log(`🗑 ${w.deleted} copie(s) supprimée(s) sur slide ${slot.slideNumber}`);
-  }
+  const w = await wipeImagesInRect(slot.slideNumber, slot.rect);
+  if (w.ok && w.deleted > 0) log(`🗑 ${w.deleted} image(s) supprimée(s)`);
 
-  /* 5. Compute fit */
   const fitted = containFit(slot.rect, dims.w, dims.h);
-  log(`Placement : x=${fitted.x.toFixed(0)} y=${fitted.y.toFixed(0)} w=${fitted.w.toFixed(0)} h=${fitted.h.toFixed(0)}`);
+  log(`Fit : ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)} @ (${fitted.x.toFixed(0)},${fitted.y.toFixed(0)})`);
 
-  /* 6. Focus slide */
   await focusSlide(slot.slideNumber);
 
-  /* 7. Paste via CDP */
   const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-  const inserted = await insertViaPaste(base64);
-  if (!inserted) throw new Error('Insertion échouée');
+  await insertViaPaste(base64);
 
-  /* 8. Position */
   await new Promise((r) => setTimeout(r, 1200));
   const pos = await positionNewImage(slot.slideNumber, fitted, templateKey);
+
   if (pos.ok) {
-    log(`✅ Image placée sur slide ${slot.slideNumber} (${slot.slot})`, 'ok');
+    log(`✅ Image placée (slide ${slot.slideNumber})`, 'ok');
     placementState.imagesPlaced++;
-    setStatus(`✅ Image placée (slide ${slot.slideNumber}, ${slot.slot})`, 'ok');
-    return { retry: false };
+    setStatus(`✅ Image placée (slide ${slot.slideNumber})`, 'ok');
   } else {
-    log(`⚠️ Positionnement échoué : ${pos.reason}`, 'err');
-    return { retry: false };
+    log(`⚠️ Positionnement échoué`, 'err');
   }
+  return { retry: false };
 }
 
 /* ================================================================
@@ -351,15 +297,14 @@ async function processQueue() {
   while (__queue.length > 0) {
     const item = __queue.shift();
     try {
-      const result = await processOneImage(item.dataUrl, item.templateKey);
-      if (result && result.retry) {
-        /* Put it back at the head — retry later */
+      const r = await processOneImage(item.dataUrl, item.templateKey);
+      if (r && r.retry) {
         __queue.unshift(item);
-        log(`⏳ En attente — retry dans ${LAYOUT.RETRY_MS}ms`);
-        await new Promise((r) => setTimeout(r, LAYOUT.RETRY_MS));
+        log(`⏳ Retry dans ${RETRY_MS}ms`);
+        await new Promise((res) => setTimeout(res, RETRY_MS));
       }
     } catch (e) {
-      log('❌ Erreur : ' + e.message, 'err');
+      log('❌ ' + e.message, 'err');
     }
   }
 
@@ -376,7 +321,7 @@ function enqueueImage(dataUrl, templateKey) {
   __lastDataUrlTs = now;
 
   __queue.push({ dataUrl, templateKey: templateKey || 'street' });
-  log(`📥 File d'attente : ${__queue.length} image(s)`);
+  log(`📥 File : ${__queue.length} image(s)`);
 
   if (!__processing) processQueue();
 }
