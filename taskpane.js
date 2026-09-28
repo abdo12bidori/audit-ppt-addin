@@ -1,6 +1,10 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v5.0
-   ================================================================ */
+   Audit Capture — PowerPoint Add-in v5.3
+   ----------------------------------------------------------------
+   v5.3: adds "📐 Mesurer les formes" button — dumps every shape's
+         position and size so the slot coordinates can be read
+         directly from the taskpane (no console needed).
+================================================================ */
 
 const state = { imagesPlaced: 0 };
 
@@ -36,7 +40,7 @@ Office.onReady((info) => {
   }
 
   const templates = window.AuditTemplates.getList();
-  log(`Add-in v5.0 démarré — ${templates.length} catégorie(s) : ${templates.map(t => t.label).join(', ')}`);
+  log(`Add-in v5.3 démarré — ${templates.length} catégorie(s) : ${templates.map(t => t.label).join(', ')}`);
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
 
   /* Listen for images */
@@ -78,36 +82,109 @@ async function refreshStats() {
   } catch (e) {}
 }
 
+/* ================================================================
+   RESET button
+================================================================ */
 const resetBtn = document.getElementById('reset');
 if (resetBtn) {
   resetBtn.addEventListener('click', () => {
     state.imagesPlaced = 0;
-    if (placementState) placementState.imagesPlaced = 0;
+    if (typeof placementState !== 'undefined' && placementState) {
+      placementState.imagesPlaced = 0;
+    }
     updateStats('-', 0);
     log('Session réinitialisée');
   });
 }
 
-/* Notify helper (may be missing) */
-if (typeof notify !== 'function') {
-  window.notify = function (msg) {
+/* ================================================================
+   MEASURE button — dump every shape on every slide
+================================================================ */
+const measureBtn = document.getElementById('measure');
+const measureOut = document.getElementById('measure-output');
+
+if (measureBtn && measureOut) {
+  measureBtn.addEventListener('click', async () => {
+    measureOut.style.display = 'block';
+    measureOut.textContent = '⏳ Mesure en cours…';
+
     try {
-      chrome.notifications && chrome.notifications.create({
-        type: 'basic',
-        iconUrl: 'icon128.png',
-        title: 'Audit Capture',
-        message: msg,
+      const result = await PowerPoint.run(async (context) => {
+        const slides = context.presentation.slides;
+        slides.load('items');
+        await context.sync();
+
+        const out = [];
+
+        for (let si = 0; si < slides.items.length; si++) {
+          const slide = slides.items[si];
+          slide.shapes.load('items');
+          await context.sync();
+
+          for (let i = 0; i < slide.shapes.items.length; i++) {
+            const s = slide.shapes.items[i];
+            let text = '';
+            try {
+              if (s.type === PowerPoint.ShapeType.textBox ||
+                  s.type === PowerPoint.ShapeType.geometricShape) {
+                s.textFrame.load('textRange/text');
+              }
+            } catch (e) {}
+            try { await context.sync(); } catch (e) {}
+            try {
+              text = (s.textFrame && s.textFrame.textRange && s.textFrame.textRange.text || '').substring(0, 30);
+            } catch (e) {}
+
+            out.push({
+              slide: si + 1,
+              idx: i,
+              name: s.name || '(unnamed)',
+              type: s.type,
+              left: Math.round(s.left ?? 0),
+              top: Math.round(s.top ?? 0),
+              w: Math.round(s.width ?? 0),
+              h: Math.round(s.height ?? 0),
+              text: text,
+            });
+          }
+        }
+        return out;
       });
-    } catch (e) {}
-  };
+
+      /* Format as text */
+      let txt = `Total: ${result.length} formes\n\n`;
+      txt += 'slide | idx | name                     | type | left | top  | w    | h\n';
+      txt += '------+-----+--------------------------+------+------+------+------+------\n';
+
+      for (const r of result) {
+        txt += `${String(r.slide).padEnd(5)} | ${String(r.idx).padEnd(3)} | ${r.name.substring(0, 24).padEnd(24)} | ${String(r.type).padEnd(4)} | ${String(r.left).padEnd(4)} | ${String(r.top).padEnd(4)} | ${String(r.w).padEnd(4)} | ${r.h}\n`;
+        if (r.text) {
+          txt += `      |     | text: "${r.text}"\n`;
+        }
+      }
+
+      txt += '\n\n--- JSON ---\n';
+      txt += JSON.stringify(result, null, 2);
+
+      measureOut.textContent = txt;
+      log(`📐 ${result.length} formes mesurées`);
+    } catch (e) {
+      measureOut.textContent = '❌ ' + (e.message || e);
+      log('❌ Mesure échouée : ' + (e.message || e), 'err');
+    }
+  });
 }
+
+/* ================================================================
+   Legacy measure function (still callable from console if needed)
+================================================================ */
 window.__measureSlots = async function () {
   return await PowerPoint.run(async (context) => {
     const slides = context.presentation.slides;
     slides.load('items');
     await context.sync();
 
-    const slide = slides.items[0];   // slide 1
+    const slide = slides.items[0];
     slide.shapes.load('items');
     await context.sync();
 
@@ -140,3 +217,19 @@ window.__measureSlots = async function () {
     return result;
   });
 };
+
+/* ================================================================
+   Notify helper (kept for compatibility)
+================================================================ */
+if (typeof notify !== 'function') {
+  window.notify = function (msg) {
+    try {
+      chrome.notifications && chrome.notifications.create({
+        type: 'basic',
+        iconUrl: 'icon128.png',
+        title: 'Audit Capture',
+        message: msg,
+      });
+    } catch (e) {}
+  };
+}
