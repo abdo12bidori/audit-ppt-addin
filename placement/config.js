@@ -15,7 +15,7 @@ window.AuditPlacement.CFG = {
   NAMESPACE: 'audit-img-',
   RETRY_MS: 3000,
   MAX_PER_SLIDE: 2,
-  OVERLAP_PAD: 5,
+  OVERLAP_PAD: 1,
 };
 
 window.AuditPlacement.state = { imagesPlaced: 0 };
