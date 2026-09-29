@@ -12,6 +12,12 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   const dims = await P.decodeImageDims(dataUrl);
   log(`Image : ${dims.w}×${dims.h} (${tpl.label})`);
 
+  /* Clean orphans before scanning */
+  const cleaned = await P.cleanAllOrphans();
+  if (cleaned.ok && cleaned.deleted > 0) {
+    log(`🧹 ${cleaned.deleted} image(s) orpheline(s) nettoyée(s)`);
+  }
+
   const slot = await P.findFreeSlot();
   if (!slot) {
     log('⚠️ Toutes les slides sont pleines', 'err');
