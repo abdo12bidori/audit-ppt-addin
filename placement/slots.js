@@ -154,3 +154,73 @@ window.AuditPlacement.focusSlide = async function (slideNumber) {
     });
   } catch (e) {}
 };
+/* ================================================================
+   Find an existing image of a given type on the LAST slide
+   Returns { slideNumber, id, rect } or null
+================================================================ */
+window.AuditPlacement.findExistingOfType = async function (templateKey) {
+  const CFG = window.AuditPlacement.CFG;
+  const targetName = CFG.NAMESPACE + templateKey;
+
+  try {
+    return await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+      if (slides.items.length === 0) return null;
+
+      /* Check the last slide only */
+      const slide = slides.items[slides.items.length - 1];
+      slide.shapes.load('items');
+      await context.sync();
+
+      for (const s of slide.shapes.items) {
+        if (s.type !== PowerPoint.ShapeType.image) continue;
+        if ((s.name || '') === targetName) {
+          return {
+            slideNumber: slides.items.length,
+            id: s.id,
+            rect: {
+              x: s.left ?? 0,
+              y: s.top ?? 0,
+              w: s.width ?? 0,
+              h: s.height ?? 0,
+            },
+          };
+        }
+      }
+      return null;
+    });
+  } catch (e) {
+    return null;
+  }
+};
+
+/* ================================================================
+   Delete a shape by ID on a specific slide
+================================================================ */
+window.AuditPlacement.deleteShapeById = async function (slideNumber, shapeId) {
+  try {
+    return await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+      if (slides.items.length < slideNumber) return { ok: false };
+
+      const slide = slides.items[slideNumber - 1];
+      slide.shapes.load('items');
+      await context.sync();
+
+      for (const s of slide.shapes.items) {
+        if (s.id === shapeId) {
+          try { s.delete(); } catch (e) {}
+          await context.sync();
+          return { ok: true };
+        }
+      }
+      return { ok: false, reason: 'shape not found' };
+    });
+  } catch (e) {
+    return { ok: false, error: e.message };
+  }
+};
