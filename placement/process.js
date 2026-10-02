@@ -1,12 +1,18 @@
 /* ================================================================
    Placement — Process one image end to end
-   ================================================================ */
+   ----------------------------------------------------------------
+   v2.0:
+     • Fix A — dedupeLastSlide() before any placement (removes
+               audit-img-* from a freshly-duplicated slide).
+     • Fix C — ask the extension for focus ONLY when a replacement
+               needs user confirmation. Normal placement never
+               steals focus from the source page.
+================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
 /* Prompt user for confirmation. Returns a Promise<boolean>. */
 window.AuditPlacement.confirmReplace = function (templateLabel) {
   return new Promise((resolve) => {
-    /* Build a dialog in the taskpane */
     const old = document.getElementById('audit-confirm');
     if (old) old.remove();
 
@@ -62,10 +68,24 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     log(`🧹 ${cleaned.deleted} image(s) orpheline(s) nettoyée(s)`);
   }
 
+  /* ⭐ FIX A — Strip audit images from a freshly-duplicated slide */
+  const deduped = await P.dedupeLastSlide();
+  if (deduped && deduped.cleaned > 0) {
+    log(`🧹 Slide dupliquée détectée — ${deduped.cleaned} image(s) retirée(s)`);
+  }
+
   /* Check for an existing image of the same type on the LAST slide */
   const existing = await P.findExistingOfType(templateKey);
   if (existing) {
     log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${existing.slideNumber})`, 'err');
+
+    /* ⭐ FIX C — ask the extension to bring the PPT tab to front
+       ONLY now, because a user decision is required. */
+    try {
+      window.parent.postMessage({ type: 'AUDIT_REQUEST_FOCUS' }, '*');
+    } catch (e) {}
+    await new Promise((r) => setTimeout(r, 350));
+
     const ok = await P.confirmReplace(tpl.label);
     if (!ok) {
       log('Utilisateur a annulé le remplacement', 'err');
@@ -73,11 +93,9 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
       return { retry: false };
     }
 
-    /* User confirmed — delete the existing image */
     const w = await P.deleteShapeById(existing.slideNumber, existing.id);
     if (w.ok) log(`🗑 Ancienne image supprimée`);
 
-    /* Place the new image at the same slot */
     const fitted = P.containFit(existing.rect, dims.w, dims.h);
     log(`Fit : ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)}`);
 

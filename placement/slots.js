@@ -4,8 +4,12 @@
    - findFreeSlot: scans all slides, returns first free slot
    - wipeAuditImages: removes audit-img-* from a slide
    - cleanAllOrphans: removes images that have no audit-img-* name
-       (these are unpositioned pastes left over from failed runs)
    - focusSlide: selects a slide so CDP paste lands there
+   - v2.0 (Fix A):
+       • _auditNamesOnSlide(slideNumber) — list audit-img-* names
+       • dedupeLastSlide() — wipes all audit-img-* from the last
+         slide IF its names all also exist on an earlier slide
+         (i.e. this slide is a freshly-duplicated copy).
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
@@ -64,7 +68,6 @@ window.AuditPlacement.findFreeSlot = async function () {
 
 /* ================================================================
    Wipe audit-img-* images on a slide
-   (leaves user's manual images alone)
 ================================================================ */
 window.AuditPlacement.wipeAuditImages = async function (slideNumber) {
   const CFG = window.AuditPlacement.CFG;
@@ -94,12 +97,6 @@ window.AuditPlacement.wipeAuditImages = async function (slideNumber) {
 
 /* ================================================================
    Clean orphan images on ALL slides
-   ----------------------------------------------------------------
-   An "orphan" is any image on any slide that does NOT have a name
-   starting with audit-img-*. These are the result of a paste that
-   succeeded but whose positioning step failed — they occupy slots
-   and block further placements.
-   This function removes them, so the slides become usable again.
 ================================================================ */
 window.AuditPlacement.cleanAllOrphans = async function () {
   const CFG = window.AuditPlacement.CFG;
@@ -109,7 +106,6 @@ window.AuditPlacement.cleanAllOrphans = async function () {
       slides.load('items');
       await context.sync();
 
-      /* Pre-load shapes for every slide */
       for (const slide of slides.items) {
         slide.shapes.load('items');
       }
@@ -154,9 +150,9 @@ window.AuditPlacement.focusSlide = async function (slideNumber) {
     });
   } catch (e) {}
 };
+
 /* ================================================================
    Find an existing image of a given type on the LAST slide
-   Returns { slideNumber, id, rect } or null
 ================================================================ */
 window.AuditPlacement.findExistingOfType = async function (templateKey) {
   const CFG = window.AuditPlacement.CFG;
@@ -169,7 +165,6 @@ window.AuditPlacement.findExistingOfType = async function (templateKey) {
       await context.sync();
       if (slides.items.length === 0) return null;
 
-      /* Check the last slide only */
       const slide = slides.items[slides.items.length - 1];
       slide.shapes.load('items');
       await context.sync();
@@ -222,5 +217,90 @@ window.AuditPlacement.deleteShapeById = async function (slideNumber, shapeId) {
     });
   } catch (e) {
     return { ok: false, error: e.message };
+  }
+};
+
+/* ================================================================
+   ⭐ FIX A — Detect and clear a freshly-duplicated slide.
+   A duplicated slide contains audit-img-* shapes with the SAME
+   names as the original. We detect this by finding the LAST slide
+   whose audit-img-* names ALL also exist on another (earlier)
+   slide. If found, we wipe all audit-img-* from the last slide
+   so it becomes a fresh slot.
+================================================================ */
+
+/* Return the list of audit-img-* names on a given slide */
+window.AuditPlacement._auditNamesOnSlide = async function (slideNumber) {
+  const CFG = window.AuditPlacement.CFG;
+  try {
+    return await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+      if (slides.items.length < slideNumber) return [];
+
+      const slide = slides.items[slideNumber - 1];
+      slide.shapes.load('items');
+      await context.sync();
+
+      return slide.shapes.items
+        .filter((s) => s.type === PowerPoint.ShapeType.image)
+        .map((s) => s.name || '')
+        .filter((n) => n.startsWith(CFG.NAMESPACE));
+    });
+  } catch (e) {
+    return [];
+  }
+};
+
+/* Wipe ALL audit-img-* from the LAST slide if it looks duplicated. */
+window.AuditPlacement.dedupeLastSlide = async function () {
+  const CFG = window.AuditPlacement.CFG;
+  try {
+    return await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+
+      const total = slides.items.length;
+      if (total < 2) return { cleaned: 0 };
+
+      for (const slide of slides.items) slide.shapes.load('items');
+      await context.sync();
+
+      const lastSlide = slides.items[total - 1];
+      const lastNames = lastSlide.shapes.items
+        .filter((s) => s.type === PowerPoint.ShapeType.image)
+        .map((s) => s.name || '')
+        .filter((n) => n.startsWith(CFG.NAMESPACE));
+
+      if (lastNames.length === 0) return { cleaned: 0 };
+
+      const earlierNames = new Set();
+      for (let i = 0; i < total - 1; i++) {
+        slides.items[i].shapes.items
+          .filter((s) => s.type === PowerPoint.ShapeType.image)
+          .forEach((s) => {
+            const n = s.name || '';
+            if (n.startsWith(CFG.NAMESPACE)) earlierNames.add(n);
+          });
+      }
+
+      const isDuplicate = lastNames.every((n) => earlierNames.has(n));
+      if (!isDuplicate) return { cleaned: 0 };
+
+      let cleaned = 0;
+      for (const s of lastSlide.shapes.items) {
+        if (s.type !== PowerPoint.ShapeType.image) continue;
+        const n = s.name || '';
+        if (!n.startsWith(CFG.NAMESPACE)) continue;
+        try { s.delete(); cleaned++; } catch (e) {}
+      }
+      if (cleaned > 0) await context.sync();
+
+      return { cleaned };
+    });
+  } catch (e) {
+    return { cleaned: 0, error: e.message };
   }
 };
