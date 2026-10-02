@@ -1,7 +1,10 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v6.0
+   Audit Capture — PowerPoint Add-in v6.1
    ----------------------------------------------------------------
    UI only. All placement logic lives in placement/*.js.
+
+   v6.1: stores the sourceTabId sent by the extension so paste.js
+         can return it to the background (fix for focus restore).
 ================================================================ */
 
 const state = { imagesPlaced: 0 };
@@ -38,7 +41,7 @@ Office.onReady((info) => {
   }
 
   const templates = window.AuditTemplates.getList();
-  log(`Add-in v6.0 démarré — ${templates.length} catégorie(s) : ${templates.map(t => t.label).join(', ')}`);
+  log(`Add-in v6.1 démarré — ${templates.length} catégorie(s) : ${templates.map(t => t.label).join(', ')}`);
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
 
   /* Listen for images from the extension */
@@ -46,12 +49,20 @@ Office.onReady((info) => {
     if (!e.data || e.data.type !== 'AUDIT_ADD_IMAGE') return;
     const mode = e.data.mode || 'normal';
     const templateKey = e.data.template || 'street';
-    log(`Image reçue (template=${templateKey}, mode=${mode})`);
+
+    /* ⭐ FIX C — store the source tab id so paste.js can return
+       it to the background for focus restore. */
+    if (e.data.sourceTabId) {
+      window.__auditSourceTabId = e.data.sourceTabId;
+    }
+
+    log(`Image reçue (template=${templateKey}, mode=${mode}, source=${e.data.sourceTabId || '?'})`);
     window.AuditPlacement.enqueueImage(e.data.dataUrl, templateKey);
   });
 
   /* Direct call */
-  window.__auditPlaceImage = (dataUrl, templateKey) => {
+  window.__auditPlaceImage = (dataUrl, templateKey, sourceTabId) => {
+    if (sourceTabId) window.__auditSourceTabId = sourceTabId;
     log(`Image reçue (direct, template=${templateKey || 'street'})`);
     window.AuditPlacement.enqueueImage(dataUrl, templateKey || 'street');
   };
@@ -90,13 +101,17 @@ if (resetBtn) {
     if (window.AuditPlacement && window.AuditPlacement.state) {
       window.AuditPlacement.state.imagesPlaced = 0;
     }
+    if (window.AuditHelpers && window.AuditHelpers.resetHelperState) {
+      window.AuditHelpers.resetHelperState();
+    }
+    window.__auditSourceTabId = null;
     updateStats('-', 0);
     log('Session réinitialisée');
   });
 }
 
 /* ================================================================
-   MEASURE button — dump every shape on every slide
+   MEASURE button
 ================================================================ */
 const measureBtn = document.getElementById('measure');
 const measureOut = document.getElementById('measure-output');
