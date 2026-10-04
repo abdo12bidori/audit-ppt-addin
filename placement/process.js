@@ -273,7 +273,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     const del = await P.deleteShapeFast(scan.slideId, ex.id);
     if (del.ok) log('🗑 Ancienne image supprimée (après succès)');
     log(`✅ Image remplacée (slide ${scan.slideNumber}) — ${Date.now() - t0} ms`, 'ok');
-    P.toast('✅ Image remplacée');
+    P.toast('✅ Image envoyée — remplacée');
     setStatus('✅ Image remplacée', 'ok');
     return { retry: false };
   }
@@ -322,7 +322,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   const pos = await P.positionNewFast(scan.slideId, scan.ids, fitted, templateKey);
   if (pos.ok) {
     log(`✅ Image placée (slide ${scan.slideNumber}, ${scan.slot.slot}) — ${Date.now() - t0} ms`, 'ok');
-    P.toast(`✅ Image placée (slide ${scan.slideNumber})`);
+    P.toast(`✅ Image envoyée (slide ${scan.slideNumber})`);
     P.state.imagesPlaced = (P.state.imagesPlaced || 0) + 1;
     setStatus(`✅ Image placée (slide ${scan.slideNumber})`, 'ok');
   } else {
