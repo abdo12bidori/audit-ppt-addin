@@ -45,8 +45,8 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
   /* ⭐ v7.0 — decide which path to take */
   const userOnPpt = P._isPptFocused();
   const skipOfficeJs =
-    opts.skipOfficeJs === true ||
-    (P.CFG.ALLOW_CDP_FALLBACK && (userOnPpt || P.CFG.PREFER_CDP_ALWAYS));
+    P.CFG.ALLOW_CDP_FALLBACK &&
+    (opts.skipOfficeJs === true || userOnPpt || P.CFG.PREFER_CDP_ALWAYS);
 
   if (skipOfficeJs) {
     log(`⚡ v7.0 — CDP direct path (userOnPpt=${userOnPpt}, forced=${opts.skipOfficeJs === true})`);
@@ -70,7 +70,7 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
   }
 
   /* ── 1) Try the clean path (Office.js — no focus) ── */
-  const officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted);
+  const officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted, opts);
 
   if (officeResult && officeResult.ok) {
     try {

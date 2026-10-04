@@ -170,141 +170,101 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   const dims = await P.decodeImageDims(dataUrl);
   log(`Image : ${dims.w}×${dims.h} (${tpl.label})`);
 
-  /* ================================================================
-     ⛔ v6.6 — cleanAllOrphans() et dedupeLastSlide() sont DÉSACTIVÉS
-     dans le flux automatique.
-     ================================================================ */
+  const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+  const t0 = Date.now();
 
-  /* Check for an existing image of the same type on the LAST slide */
-  const existing = await P.findExistingOfType(templateKey);
-  if (existing) {
-    log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${existing.slideNumber})`, 'err');
+  /* ⚡ ONE scan of the LAST slide (also selects it) */
+  let scan = await P.scanLast(templateKey);
+  if (!scan) { log('❌ Aucune slide', 'err'); return { retry: false }; }
 
-    /* ⭐ v6.3 — bring PPT to the front BEFORE showing the dialog. */
-    await P.requestPptFocus();
+  /* ───────────── Same type already there → replace ───────────── */
+  if (scan.existing) {
+    const ex = scan.existing;
+    log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${scan.slideNumber})`, 'err');
 
-    await P.focusSlide(existing.slideNumber);
-    await P.selectShape(existing.slideNumber, existing.id);
+    const pptFront = await P.requestPptFocus();
+    await P.selectShape(scan.slideNumber, ex.id);
 
-    let ok = await P.confirmReplaceInSource(tpl.label, 2000);
-
-    if (ok === null) {
-      log('⚠️ Source dialog unreachable / timeout (2s) — using taskpane dialog');
+    let ok;
+    if (pptFront && P._isPptFocused()) {
       ok = await P.confirmReplace(tpl.label);
+    } else {
+      ok = await P.confirmReplaceInSource(tpl.label, CFG.CONFIRM_TIMEOUT_MS);
+      if (ok === null) ok = await P.confirmReplace(tpl.label);
     }
-
     if (!ok) {
       log('Utilisateur a annulé le remplacement', 'err');
       setStatus('Image ignorée', 'err');
       return { retry: false };
     }
 
-    const w = await P.deleteShapeById(existing.slideNumber, existing.id);
-    if (w.ok) log(`🗑 Ancienne image supprimée`);
+    const del = await P.deleteShapeFast(scan.slideId, ex.id);
+    if (del.ok) log('🗑 Ancienne image supprimée');
 
-    const fitted = P.containFit(existing.rect, dims.w, dims.h);
-    log(`Fit : ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)}`);
+    const fitted = P.containFit(ex.rect, dims.w, dims.h);
+    const before = scan.ids.filter((id) => id !== ex.id);
 
-    await P.focusSlide(existing.slideNumber);
+    const ins = await P.insertViaPaste(base64, scan.slideNumber, fitted, { skipPrep: true });
+    if (!ins || !ins.ok) return { retry: false };
 
-    const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-
-    /* ⭐ v7.0 — user just answered the Replace dialog and PPT is
-       in front → CDP Ctrl+V directly (~300 ms instead of 2–8 s). */
-    const insertResult = await P.insertViaPaste(
-      base64,
-      existing.slideNumber,
-      fitted,
-      { skipOfficeJs: true }
-    );
-
-    if (!insertResult || !insertResult.ok) {
-      return { retry: false };
-    }
-
-    /* ⭐ v7.0 — CDP path benefits from a short settle before
-       polling. 300 ms is enough on most tenants. */
-    await new Promise((r) => setTimeout(r, 300));
-
-    const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
-      ? insertResult.imagesBefore
-      : null;
-
-    const pos = await P.positionNewImage(
-      existing.slideNumber, fitted, templateKey, imagesBefore
-    );
-
+    const pos = await P.positionNewFast(scan.slideId, before, fitted, templateKey);
     if (pos.ok) {
-      log(`✅ Image remplacée (slide ${existing.slideNumber})`, 'ok');
-      setStatus(`✅ Image remplacée`, 'ok');
+      log(`✅ Image remplacée (slide ${scan.slideNumber}) — ${Date.now() - t0} ms`, 'ok');
+      setStatus('✅ Image remplacée', 'ok');
     } else {
-      log(`⚠️ Positionnement échoué : ${pos.reason || pos.error || '?'}`, 'err');
+      log(`⚠️ Positionnement échoué : ${pos.reason || '?'}`, 'err');
     }
     return { retry: false };
   }
 
-  /* Normal placement */
-  let slot = await P.findFreeSlot();
-  if (!slot) {
-    log('📑 Toutes les slides sont pleines — duplication automatique…');
-    setStatus('📑 Duplication de la slide…');
-
-    /* ⭐ v6.3 — bring PPT to the front so the user sees the new
-       slide appear, then the image land on it.
-       ⭐ v7.0 — this is also what makes the CDP fast path valid
-       right after: the user is now on PPT. */
-    await P.requestPptFocus();
-
-    const dup = await P.duplicateLastSlide();
-    if (dup.ok) {
-      log(`✅ Slide ${dup.slideNumber} dupliquée`, 'ok');
-      slot = await P.findFreeSlot();
+  /* ───────────── Normal placement ───────────── */
+  if (!scan.slot) {
+    if (CFG.AUTO_DUPLICATE) {
+      log('📑 Slide pleine — duplication automatique…');
+      setStatus('📑 Duplication de la slide…');
+      const dup = await P.duplicateLastSlide();
+      if (dup.ok) {
+        log(`✅ Slide ${dup.slideNumber} dupliquée`, 'ok');
+        scan = await P.scanLast(templateKey);
+      } else {
+        log('⚠️ Duplication échouée : ' + (dup.reason || '?'), 'err');
+      }
     } else {
-      log('⚠️ Duplication échouée : ' + (dup.reason || '?'), 'err');
+      /* ⭐ 2 images per slide → bring PPT to the front and wait for the
+         user to duplicate; scanLast then clears the copied images. */
+      log('📑 Slide pleine — en attente de la duplication par l\'utilisateur…');
+      setStatus('📑 Slide pleine — dupliquez la slide', 'err');
+      await P.requestPptFocus();
+
+      const dupOk = await P.waitForUserDuplicate(scan.slideNumber, scan.slideId);
+      if (!dupOk) {
+        log('Duplication annulée / délai dépassé — image ignorée', 'err');
+        setStatus('Image ignorée', 'err');
+        return { retry: false };
+      }
+      log('✅ Nouvelle slide détectée', 'ok');
+      scan = await P.scanLast(templateKey);
     }
   }
-  if (!slot) {
+  if (!scan || !scan.slot) {
     log('⚠️ Toutes les slides sont pleines', 'err');
     setStatus('⚠️ Slides pleines — dupliquez-en une', 'err');
     return { retry: true };
   }
-  log(`Slot libre : slide ${slot.slideNumber}, ${slot.slot}`);
 
-  const fitted = P.containFit(slot.rect, dims.w, dims.h);
-  log(`Fit : ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)} @ (${fitted.x.toFixed(0)},${fitted.y.toFixed(0)})`);
+  const fitted = P.containFit(scan.slot.rect, dims.w, dims.h);
+  log(`Slot : slide ${scan.slideNumber}, ${scan.slot.slot} — fit ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)}`);
 
-  await P.focusSlide(slot.slideNumber);
+  const ins = await P.insertViaPaste(base64, scan.slideNumber, fitted, { skipPrep: true });
+  if (!ins || !ins.ok) return { retry: false };
 
-  const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-
-  /* ⭐ v7.0 — if the user was brought to PPT by the duplicate-slide
-     flow, or if they are already on PPT for any reason, go
-     straight to CDP. insertViaPaste auto-detects this. */
-  const insertResult = await P.insertViaPaste(base64, slot.slideNumber, fitted);
-
-  if (!insertResult || !insertResult.ok) {
-    return { retry: false };
-  }
-
-  /* ⭐ v7.0 — short settle: 300 ms for CDP, 500 ms for Office.js. */
-  const settleMs = insertResult.method === 'cdp' ? 300 : 500;
-  await new Promise((r) => setTimeout(r, settleMs));
-
-  const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
-    ? insertResult.imagesBefore
-    : null;
-
-  const pos = await P.positionNewImage(
-    slot.slideNumber, fitted, templateKey, imagesBefore
-  );
-
+  const pos = await P.positionNewFast(scan.slideId, scan.ids, fitted, templateKey);
   if (pos.ok) {
-    log(`✅ Image placée (slide ${slot.slideNumber}, ${slot.slot})`, 'ok');
+    log(`✅ Image placée (slide ${scan.slideNumber}, ${scan.slot.slot}) — ${Date.now() - t0} ms`, 'ok');
     P.state.imagesPlaced = (P.state.imagesPlaced || 0) + 1;
-    setStatus(`✅ Image placée (slide ${slot.slideNumber})`, 'ok');
+    setStatus(`✅ Image placée (slide ${scan.slideNumber})`, 'ok');
   } else {
-    log(`⚠️ Positionnement échoué : ${pos.reason || pos.error || '?'}`, 'err');
+    log(`⚠️ Positionnement échoué : ${pos.reason || '?'}`, 'err');
   }
-
   return { retry: false };
 };
