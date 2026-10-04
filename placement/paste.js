@@ -44,9 +44,9 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
 
   /* ⭐ v7.0 — decide which path to take */
   const userOnPpt = P._isPptFocused();
-  const skipOfficeJs =
-    P.CFG.ALLOW_CDP_FALLBACK &&
-    (opts.skipOfficeJs === true || userOnPpt || P.CFG.PREFER_CDP_ALWAYS);
+  /* CDP is NEVER the first choice (it can freeze Chrome). It is only the
+     last resort below, after Office.js failed twice. */
+  const skipOfficeJs = P.CFG.PREFER_CDP_ALWAYS === true;
 
   if (skipOfficeJs) {
     log(`⚡ v7.0 — CDP direct path (userOnPpt=${userOnPpt}, forced=${opts.skipOfficeJs === true})`);
@@ -70,7 +70,12 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
   }
 
   /* ── 1) Try the clean path (Office.js — no focus) ── */
-  const officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted, opts);
+  let officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted, opts);
+  if (!officeResult || !officeResult.ok) {
+    log('↻ Office.js : 2e tentative…');
+    await new Promise((r) => setTimeout(r, 400));
+    officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted, opts);
+  }
 
   if (officeResult && officeResult.ok) {
     try {

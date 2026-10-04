@@ -31,7 +31,7 @@ window.AuditPlacement.CFG = {
      pass { skipOfficeJs: true } because the user has just been
      brought to PPT by requestPptFocus() — so CDP is the fast
      and safe path there. */
-  ALLOW_CDP_FALLBACK: false,   /* ⭐ false = no CDP Ctrl+V (it froze Chrome on Replace) */
+  ALLOW_CDP_FALLBACK: true,    /* ⭐ LAST RESORT only: used if Office.js fails twice, so no image is lost */
   PREFER_CDP_ALWAYS: false,
 
   /* Time the user has to answer the Replace dialog in the source page */
@@ -46,7 +46,7 @@ window.AuditPlacement.CFG = {
                places the image)
        true  = script duplicates the slide by itself */
   AUTO_DUPLICATE: false,
-  WAIT_DUPLICATE_MS: 180000,   /* max wait for the user (3 min) */
+  WAIT_DUPLICATE_MS: 0,        /* 0 = wait as long as needed (nothing is dropped) */
 
   NAMESPACE: 'audit-img-',
   RETRY_MS: 3000,

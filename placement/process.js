@@ -73,7 +73,7 @@ window.AuditPlacement.requestPptFocus = function () {
     setTimeout(() => {
       window.removeEventListener('message', onAck, false);
       resolve(false);
-    }, 300);
+    }, 1500);
   });
 };
 
@@ -210,22 +210,28 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
       return { retry: false };
     }
 
-    const del = await P.deleteShapeFast(scan.slideId, ex.id);
-    if (del.ok) log('🗑 Ancienne image supprimée');
-
+    /* ⭐ NOTHING IS LOST: insert the NEW image first, verify it, and only
+       then delete the old one. If anything fails the old image stays. */
     const fitted = P.containFit(ex.rect, dims.w, dims.h);
-    const before = scan.ids.filter((id) => id !== ex.id);
 
     const ins = await P.insertViaPaste(base64, scan.slideNumber, fitted, { skipPrep: true });
-    if (!ins || !ins.ok) return { retry: false };
-
-    const pos = await P.positionNewFast(scan.slideId, before, fitted, templateKey);
-    if (pos.ok) {
-      log(`✅ Image remplacée (slide ${scan.slideNumber}) — ${Date.now() - t0} ms`, 'ok');
-      setStatus('✅ Image remplacée', 'ok');
-    } else {
-      log(`⚠️ Positionnement échoué : ${pos.reason || '?'}`, 'err');
+    if (!ins || !ins.ok) {
+      log('❌ Insertion échouée — ancienne image CONSERVÉE (image gardée pour réessayer)', 'err');
+      setStatus('❌ Échec — ancienne image conservée', 'err');
+      return { retry: false, keep: true };
     }
+
+    const pos = await P.positionNewFast(scan.slideId, scan.ids, fitted, templateKey);
+    if (!pos.ok) {
+      log('⚠️ Nouvelle image introuvable — ancienne image CONSERVÉE, vérifiez la slide', 'err');
+      setStatus('⚠️ Vérifiez la slide (ancienne image conservée)', 'err');
+      return { retry: false };
+    }
+
+    const del = await P.deleteShapeFast(scan.slideId, ex.id);
+    if (del.ok) log('🗑 Ancienne image supprimée (après succès)');
+    log(`✅ Image remplacée (slide ${scan.slideNumber}) — ${Date.now() - t0} ms`, 'ok');
+    setStatus('✅ Image remplacée', 'ok');
     return { retry: false };
   }
 
@@ -250,9 +256,9 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
 
       const dupOk = await P.waitForUserDuplicate(scan.slideNumber, scan.slideId);
       if (!dupOk) {
-        log('Duplication annulée / délai dépassé — image ignorée', 'err');
-        setStatus('Image ignorée', 'err');
-        return { retry: false };
+        log('Duplication annulée — image GARDÉE (bouton Réessayer)', 'err');
+        setStatus('Image gardée — cliquez Réessayer', 'err');
+        return { retry: false, keep: true };
       }
       log('✅ Nouvelle slide détectée', 'ok');
       scan = await P.scanLast(templateKey);
@@ -268,7 +274,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   log(`Slot : slide ${scan.slideNumber}, ${scan.slot.slot} — fit ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)}`);
 
   const ins = await P.insertViaPaste(base64, scan.slideNumber, fitted, { skipPrep: true });
-  if (!ins || !ins.ok) return { retry: false };
+  if (!ins || !ins.ok) return { retry: true };   /* queue retries, then keeps the image */
 
   const pos = await P.positionNewFast(scan.slideId, scan.ids, fitted, templateKey);
   if (pos.ok) {

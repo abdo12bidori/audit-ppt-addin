@@ -190,7 +190,7 @@ window.AuditPlacement.waitForUserDuplicate = function (prevCount, prevLastId) {
     const t0 = Date.now();
     (async () => {
       while (!done) {
-        if (Date.now() - t0 > CFG.WAIT_DUPLICATE_MS) return finish(false);
+        if (CFG.WAIT_DUPLICATE_MS && Date.now() - t0 > CFG.WAIT_DUPLICATE_MS) return finish(false);
         await _sleep(1200);
         if (done) return;
         try {
