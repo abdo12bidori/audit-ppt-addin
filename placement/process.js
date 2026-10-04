@@ -16,9 +16,15 @@
 
    v6.4 — SPEED:
      • requestPptFocus fallback timeout: 1200 → 400 ms.
-     • Initial wait before positionNewImage: 2000 → 800 ms
-       (positionNewImage already retries up to 6 s, so a shorter
-        first wait costs nothing in reliability).
+     • Initial wait before positionNewImage: 2000 → 800 ms.
+
+   v6.5 — SPEED / UX:
+     • confirmReplaceInSource timeout: 30 s → 2 s (paramétrable).
+       Si le dialog source ne répond pas dans 2 s, on bascule
+       immédiatement sur le dialog taskpane. Fini les 32 s
+       d'attente quand la page source n'a pas le content script.
+     • Logs de diagnostic : on voit maintenant si le dialog source
+       a répondu, si c'est un timeout, ou si l'utilisateur a annulé.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
@@ -52,7 +58,7 @@ window.AuditPlacement.requestPptFocus = function () {
       return;
     }
 
-    /* ⭐ v6.4 — fallback timeout reduced from 1200 to 400 ms.
+    /* ⭐ v6.4 — fallback timeout 1200 → 400 ms.
        Focus is best-effort; the ACK normally arrives in 150–250 ms. */
     setTimeout(() => {
       window.removeEventListener('message', onAck, false);
@@ -102,16 +108,29 @@ window.AuditPlacement.confirmReplace = function (templateLabel) {
   });
 };
 
-/* Ask the extension to show the replace dialog in the source page. */
-window.AuditPlacement.confirmReplaceInSource = function (templateLabel) {
+/* Ask the extension to show the replace dialog in the source page.
+   ⭐ v6.5 — timeoutMs param (default 2000 ms instead of 30 s).
+   If the source page doesn't answer in time, resolves null so the
+   caller can immediately fall back to the taskpane dialog. */
+window.AuditPlacement.confirmReplaceInSource = function (templateLabel, timeoutMs) {
+  const TIMEOUT = typeof timeoutMs === 'number' ? timeoutMs : 2000;
   return new Promise((resolve) => {
     const requestId = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+
+    let settled = false;
+    const settle = (value, reason) => {
+      if (settled) return;
+      settled = true;
+      window.removeEventListener('message', onAnswer);
+      clearTimeout(timer);
+      console.log(`[AuditCapture:addin] confirmReplaceInSource → ${reason} (${value})`);
+      resolve(value);
+    };
 
     const onAnswer = (e) => {
       if (!e.data || e.data.type !== 'AUDIT_REPLACE_ANSWER') return;
       if (e.data.requestId !== requestId) return;
-      window.removeEventListener('message', onAnswer);
-      resolve(!!e.data.ok);
+      settle(!!e.data.ok, 'answered');
     };
     window.addEventListener('message', onAnswer, false);
 
@@ -122,16 +141,15 @@ window.AuditPlacement.confirmReplaceInSource = function (templateLabel) {
         templateLabel: templateLabel,
         ts: Date.now(),
       }, '*');
+      console.log(`[AuditCapture:addin] confirmReplaceInSource → sent (requestId=${requestId}, timeout=${TIMEOUT}ms)`);
     } catch (e) {
-      window.removeEventListener('message', onAnswer);
-      resolve(null);
+      settle(null, 'postMessage failed');
       return;
     }
 
-    setTimeout(() => {
-      window.removeEventListener('message', onAnswer);
-      resolve(null);
-    }, 30000);
+    const timer = setTimeout(() => {
+      settle(null, `timeout after ${TIMEOUT}ms`);
+    }, TIMEOUT);
   });
 };
 
@@ -172,10 +190,12 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     await P.focusSlide(existing.slideNumber);
     await P.selectShape(existing.slideNumber, existing.id);
 
-    let ok = await P.confirmReplaceInSource(tpl.label);
+    /* ⭐ v6.5 — try the source dialog for 2 s max, then fall back
+       to the taskpane dialog. Fini les 32 secondes d'attente. */
+    let ok = await P.confirmReplaceInSource(tpl.label, 2000);
 
     if (ok === null) {
-      log('⚠️ Source dialog unreachable — using taskpane dialog');
+      log('⚠️ Source dialog unreachable / timeout (2s) — using taskpane dialog');
       ok = await P.confirmReplace(tpl.label);
     }
 
@@ -200,8 +220,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
       return { retry: false };
     }
 
-    /* ⭐ v6.4 — wait 800 ms (was 2000 ms). positionNewImage already
-       retries up to 6 s, so a shorter first wait costs nothing. */
+    /* ⭐ v6.4 — wait 800 ms (was 2000 ms). */
     await new Promise((r) => setTimeout(r, 800));
 
     const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
@@ -258,8 +277,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     return { retry: false };
   }
 
-  /* ⭐ v6.4 — wait 800 ms (was 2000 ms). positionNewImage already
-     retries up to 6 s, so a shorter first wait costs nothing. */
+  /* ⭐ v6.4 — wait 800 ms (was 2000 ms). */
   await new Promise((r) => setTimeout(r, 800));
 
   const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
