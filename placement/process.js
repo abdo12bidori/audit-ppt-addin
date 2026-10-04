@@ -1,16 +1,16 @@
 /* ================================================================
    Placement — Process one image end to end
    ----------------------------------------------------------------
-   v2.0:
-     • Fix A — dedupeLastSlide() before any placement (removes
-               audit-img-* from a freshly-duplicated slide).
-     • Fix C — ask the extension for focus ONLY when a replacement
-               needs user confirmation. Normal placement never
-               steals focus from the source page.
+   v5.0:
+     • insertViaPaste now takes the target slideNumber so the
+       Office.js path can pre-select it.
+     • Keeps Fix A (dedupeLastSlide) and the source-page replace
+       dialog.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
-/* Prompt user for confirmation. Returns a Promise<boolean>. */
+/* Prompt user for confirmation — shown INSIDE the taskpane (still
+   used as a fallback if the source-page dialog is unreachable). */
 window.AuditPlacement.confirmReplace = function (templateLabel) {
   return new Promise((resolve) => {
     const old = document.getElementById('audit-confirm');
@@ -46,9 +46,45 @@ window.AuditPlacement.confirmReplace = function (templateLabel) {
     document.body.appendChild(dlg);
 
     const cleanup = () => { try { dlg.remove(); } catch (e) {} };
-
     document.getElementById('audit-confirm-ok').onclick = () => { cleanup(); resolve(true); };
     document.getElementById('audit-confirm-cancel').onclick = () => { cleanup(); resolve(false); };
+  });
+};
+
+/* Ask the extension to show the replace dialog in the source page.
+   Returns a Promise<boolean>. */
+window.AuditPlacement.confirmReplaceInSource = function (templateLabel) {
+  return new Promise((resolve) => {
+    const requestId = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+
+    /* Listen for the answer once */
+    const onAnswer = (e) => {
+      if (!e.data || e.data.type !== 'AUDIT_REPLACE_ANSWER') return;
+      if (e.data.requestId !== requestId) return;
+      window.removeEventListener('message', onAnswer);
+      resolve(!!e.data.ok);
+    };
+    window.addEventListener('message', onAnswer, false);
+
+    /* Send the request */
+    try {
+      window.parent.postMessage({
+        type: 'AUDIT_REPLACE_NEEDED',
+        requestId: requestId,
+        templateLabel: templateLabel,
+        ts: Date.now(),
+      }, '*');
+    } catch (e) {
+      window.removeEventListener('message', onAnswer);
+      resolve(null);  /* null = couldn't reach the source page */
+      return;
+    }
+
+    /* Timeout after 30s — fall back to taskpane dialog */
+    setTimeout(() => {
+      window.removeEventListener('message', onAnswer);
+      resolve(null);
+    }, 30000);
   });
 };
 
@@ -68,7 +104,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     log(`🧹 ${cleaned.deleted} image(s) orpheline(s) nettoyée(s)`);
   }
 
-  /* ⭐ FIX A — Strip audit images from a freshly-duplicated slide */
+  /* Fix A — strip images from a freshly-duplicated slide */
   const deduped = await P.dedupeLastSlide();
   if (deduped && deduped.cleaned > 0) {
     log(`🧹 Slide dupliquée détectée — ${deduped.cleaned} image(s) retirée(s)`);
@@ -79,14 +115,18 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   if (existing) {
     log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${existing.slideNumber})`, 'err');
 
-    /* ⭐ FIX C — ask the extension to bring the PPT tab to front
-       ONLY now, because a user decision is required. */
-    try {
-      window.parent.postMessage({ type: 'AUDIT_REQUEST_FOCUS' }, '*');
-    } catch (e) {}
-    await new Promise((r) => setTimeout(r, 350));
+    /* Try the source-page dialog first */
+    let ok = await P.confirmReplaceInSource(tpl.label);
 
-    const ok = await P.confirmReplace(tpl.label);
+    /* Fallback to the in-taskpane dialog if the source page didn't reply */
+    if (ok === null) {
+      log('⚠️ Source dialog unreachable — using taskpane dialog');
+      /* Ask the extension for focus so the user sees the dialog */
+      try { window.parent.postMessage({ type: 'AUDIT_REQUEST_FOCUS' }, '*'); } catch (e) {}
+      await new Promise((r) => setTimeout(r, 350));
+      ok = await P.confirmReplace(tpl.label);
+    }
+
     if (!ok) {
       log('Utilisateur a annulé le remplacement', 'err');
       setStatus('Image ignorée', 'err');
@@ -102,7 +142,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     await P.focusSlide(existing.slideNumber);
 
     const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    await P.insertViaPaste(base64);
+    await P.insertViaPaste(base64, existing.slideNumber);
 
     await new Promise((r) => setTimeout(r, 1200));
     const pos = await P.positionNewImage(existing.slideNumber, fitted, templateKey);
@@ -114,7 +154,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     return { retry: false };
   }
 
-  /* No existing image of this type — normal placement */
+  /* Normal placement */
   const slot = await P.findFreeSlot();
   if (!slot) {
     log('⚠️ Toutes les slides sont pleines', 'err');
@@ -129,7 +169,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   await P.focusSlide(slot.slideNumber);
 
   const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-  await P.insertViaPaste(base64);
+  await P.insertViaPaste(base64, slot.slideNumber);
 
   await new Promise((r) => setTimeout(r, 1200));
   const pos = await P.positionNewImage(slot.slideNumber, fitted, templateKey);

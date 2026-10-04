@@ -1,56 +1,48 @@
 /* ================================================================
-   Placement — Paste via clipboard + CDP Ctrl+V
+   Placement — Paste orchestrator
    ----------------------------------------------------------------
-   v3.0:
-     • Fix B — the paste request carries the dataUrl and
-               sourceTabId so background.js can:
-                 – do an atomic CDP clipboard write immediately
-                   before Ctrl+V (Windows screenshots can no
-                   longer steal the paste);
-                 – restore focus to the source page after paste.
-     • The sourceTabId is read from the last AUDIT_ADD_IMAGE
-       message the taskpane received (stored on window).
+   v5.0:
+     • Tries insertViaOfficeJs() FIRST (no focus, no flash).
+     • If it fails → falls back to insertViaCdpPaste() (brief
+       focus of the PPT tab, ~300 ms).
+     • Reports the outcome to the extension so it can show a
+       toast in the source page.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
-window.AuditPlacement.insertViaPaste = async function (base64) {
-  const dataUrl = 'data:image/png;base64,' + base64;
-
-  /* Retrouve le sourceTabId stocké par taskpane.js au moment de
-     la réception du message AUDIT_ADD_IMAGE. */
+window.AuditPlacement.insertViaPaste = async function (base64, slideNumber) {
+  const P = window.AuditPlacement;
   const sourceTabId = window.__auditSourceTabId || null;
 
-  /* ─────────── Fallback clipboard write (page context) ─────────── */
-  const writeClipboard = async (label) => {
-    try {
-      window.parent.postMessage({ type: 'AUDIT_WRITE_CLIPBOARD', dataUrl, ts: Date.now() }, '*');
-      log(`→ [${label}] presse-papier`);
-      await new Promise((r) => setTimeout(r, 500));
-    } catch (e) {
-      log(`⚠️ ${label}: ${e.message}`, 'err');
-    }
-  };
+  /* ── 1) Try the clean path (no focus) ── */
+  const officeResult = await P.insertViaOfficeJs(base64, slideNumber);
 
-  /* ─────────── Main paste request (atomic via background) ─────────── */
-  const pasteRequest = async (label) => {
+  if (officeResult && officeResult.ok) {
+    /* Success — notify the extension so it can show "✅ prêt" */
     try {
       window.parent.postMessage({
-        type: 'AUDIT_PASTE_REQUEST',
-        dataUrl: dataUrl,          /* Fix B */
-        sourceTabId: sourceTabId,  /* Fix C */
+        type: 'AUDIT_SHOW_TOAST',
+        text: '✅ Image insérée dans PowerPoint',
+        sourceTabId: sourceTabId,
         ts: Date.now(),
       }, '*');
-      log(`→ [${label}] collage`);
-    } catch (e) {
-      log(`⚠️ ${label}: ${e.message}`, 'err');
-    }
-  };
+    } catch (e) {}
+    return true;
+  }
 
-  /* Fallback only — background.js does the atomic CDP write.
-     We still call writeClipboard() once so that even if CDP
-     fails, the clipboard holds the right content. */
-  await writeClipboard('fallback');
-  await pasteRequest('main');
-  await new Promise((r) => setTimeout(r, 900));
+  /* ── 2) Fallback: CDP Ctrl+V ── */
+  log('↩️ Fallback CDP (Office.js a échoué)', 'err');
+  await P.insertViaCdpPaste(base64);
+
+  /* Notify the extension of the fallback path */
+  try {
+    window.parent.postMessage({
+      type: 'AUDIT_SHOW_TOAST',
+      text: '✅ Image envoyée (méthode CDP)',
+      sourceTabId: sourceTabId,
+      ts: Date.now(),
+    }, '*');
+  } catch (e) {}
+
   return true;
 };
