@@ -185,13 +185,25 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     const pptFront = await P.requestPptFocus();
     await P.selectShape(scan.slideNumber, ex.id);
 
+    /* ⭐ The user is on the PPT tab (focus requested), so the dialog
+       MUST appear there immediately. The old code waited up to 60 s for
+       an answer from the source page the user could not see → the UI
+       looked frozen. Now: taskpane dialog at once; the source-page
+       dialog only runs in parallel if the ack failed or CONFIRM_IN_SOURCE
+       is on, and the first answer wins. */
     let ok;
-    if (pptFront && P._isPptFocused()) {
-      ok = await P.confirmReplace(tpl.label);
+    const tp = P.confirmReplace(tpl.label);
+    if (pptFront && !CFG.CONFIRM_IN_SOURCE) {
+      ok = await tp;
     } else {
-      ok = await P.confirmReplaceInSource(tpl.label, CFG.CONFIRM_TIMEOUT_MS);
-      if (ok === null) ok = await P.confirmReplace(tpl.label);
+      const src = P.confirmReplaceInSource(tpl.label, CFG.CONFIRM_TIMEOUT_MS)
+        .then((v) => (v === null ? new Promise(() => {}) : v));   /* ignore timeout */
+      ok = await Promise.race([tp, src]);
+      const dlg = document.getElementById('audit-confirm');
+      if (dlg) dlg.remove();
+      try { window.parent.postMessage({ type: 'AUDIT_REPLACE_CANCEL', ts: Date.now() }, '*'); } catch (e) {}
     }
+
     if (!ok) {
       log('Utilisateur a annulé le remplacement', 'err');
       setStatus('Image ignorée', 'err');

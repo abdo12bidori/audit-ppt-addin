@@ -36,6 +36,9 @@ window.AuditPlacement.CFG = {
 
   /* Time the user has to answer the Replace dialog in the source page */
   CONFIRM_TIMEOUT_MS: 60000,
+  /* true = ALSO show the Replace dialog in the source page (race).
+     false = taskpane only when PPT is in front. */
+  CONFIRM_IN_SOURCE: false,
 
   /* Slide full (2 images):
        false = bring PPT to the front and WAIT for the user to
