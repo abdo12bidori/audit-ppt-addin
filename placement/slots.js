@@ -4,12 +4,19 @@
    - findFreeSlot: scans all slides, returns first free slot
    - wipeAuditImages: removes audit-img-* from a slide
    - cleanAllOrphans: removes images that have no audit-img-* name
+       ⚠️ v2.1 — MANUAL ONLY. Do not call from processOneImage:
+       it deletes the template images AND the freshly pasted image.
    - focusSlide: selects a slide so CDP paste lands there
    - v2.0 (Fix A):
        • _auditNamesOnSlide(slideNumber) — list audit-img-* names
-       • dedupeLastSlide() — wipes all audit-img-* from the last
-         slide IF its names all also exist on an earlier slide
-         (i.e. this slide is a freshly-duplicated copy).
+       • dedupeLastSlide() — wipes audit-img-* from the last slide
+         IF its names all also exist on an earlier slide.
+         ⚠️ v2.1 — MANUAL ONLY, same reason as cleanAllOrphans.
+   - v2.1:
+       • findFreeSlot now ONLY counts images named audit-img-*
+         (it ignores template images: logo, map, title cartouche).
+         This makes slot detection stable and prevents "slides
+         pleines" false positives.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
@@ -36,6 +43,10 @@ window.AuditPlacement.imagesOverlap = function (images, rect) {
 /* ================================================================
    Find the first slide with a free slot
    Returns { slideNumber, slot, rect } or null
+
+   ⭐ v2.1 — ONLY images named audit-img-* are considered. The
+   template images (logo, map, title cartouche) are ignored so
+   that they don't make the slide look "full".
 ================================================================ */
 window.AuditPlacement.findFreeSlot = async function () {
   const CFG = window.AuditPlacement.CFG;
@@ -51,14 +62,17 @@ window.AuditPlacement.findFreeSlot = async function () {
       slide.shapes.load('items');
       await context.sync();
 
-      const images = slide.shapes.items.filter(
-        (s) => s.type === PowerPoint.ShapeType.image
+      /* ⭐ v2.1 — filter: type=image AND name starts with audit-img- */
+      const auditImages = slide.shapes.items.filter(
+        (s) =>
+          s.type === PowerPoint.ShapeType.image &&
+          (s.name || '').startsWith(CFG.NAMESPACE)
       );
 
-      if (!overlap(images, CFG.SLOT_LEFT)) {
+      if (!overlap(auditImages, CFG.SLOT_LEFT)) {
         return { slideNumber: i + 1, slot: 'left', rect: CFG.SLOT_LEFT };
       }
-      if (!overlap(images, CFG.SLOT_RIGHT)) {
+      if (!overlap(auditImages, CFG.SLOT_RIGHT)) {
         return { slideNumber: i + 1, slot: 'right', rect: CFG.SLOT_RIGHT };
       }
     }
@@ -97,6 +111,13 @@ window.AuditPlacement.wipeAuditImages = async function (slideNumber) {
 
 /* ================================================================
    Clean orphan images on ALL slides
+
+   ⚠️ v2.1 — MANUAL ONLY.
+   This function deletes EVERY image that is not named audit-img-*.
+   That includes the template images (logo, map, title cartouche)
+   AND any freshly pasted image that hasn't been named yet.
+   Calling it from processOneImage caused an infinite loop that
+   froze Chrome. Keep it for a manual "Nettoyer" button.
 ================================================================ */
 window.AuditPlacement.cleanAllOrphans = async function () {
   const CFG = window.AuditPlacement.CFG;
@@ -222,11 +243,12 @@ window.AuditPlacement.deleteShapeById = async function (slideNumber, shapeId) {
 
 /* ================================================================
    ⭐ FIX A — Detect and clear a freshly-duplicated slide.
-   A duplicated slide contains audit-img-* shapes with the SAME
-   names as the original. We detect this by finding the LAST slide
-   whose audit-img-* names ALL also exist on another (earlier)
-   slide. If found, we wipe all audit-img-* from the last slide
-   so it becomes a fresh slot.
+
+   ⚠️ v2.1 — MANUAL ONLY.
+   This function deletes audit-img-* from the last slide IF their
+   names also exist on an earlier slide. Useful only in specific
+   scenarios (e.g. after a manual duplicate). Do NOT call from
+   processOneImage.
 ================================================================ */
 
 /* Return the list of audit-img-* names on a given slide */

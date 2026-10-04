@@ -20,11 +20,16 @@
 
    v6.5 — SPEED / UX:
      • confirmReplaceInSource timeout: 30 s → 2 s (paramétrable).
-       Si le dialog source ne répond pas dans 2 s, on bascule
-       immédiatement sur le dialog taskpane. Fini les 32 s
-       d'attente quand la page source n'a pas le content script.
-     • Logs de diagnostic : on voit maintenant si le dialog source
-       a répondu, si c'est un timeout, ou si l'utilisateur a annulé.
+
+   v6.6 — STABILITY / SPEED:
+     • ⛔ cleanAllOrphans() and dedupeLastSlide() are NO LONGER
+       called automatically in processOneImage. They were deleting
+       the template images (logo, map, title cartouche) AND the
+       image that had just been pasted (which has no audit-img-*
+       name yet). Result: infinite loop, Chrome frozen.
+       They remain available for manual invocation.
+     • requestPptFocus timeout: 400 → 300 ms.
+     • Initial wait before positionNewImage: 800 → 500 ms.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
@@ -32,7 +37,7 @@ window.AuditPlacement = window.AuditPlacement || {};
    Ask the extension to bring the PowerPoint tab to the front.
    Used before showing "Replace?" and before duplicating a slide
    so the user can SEE the slide in PPT while deciding.
-   Resolves true if focus was granted (or after a 400 ms timeout).
+   Resolves true if focus was granted (or after a 300 ms timeout).
 ================================================================ */
 window.AuditPlacement.requestPptFocus = function () {
   return new Promise((resolve) => {
@@ -58,12 +63,11 @@ window.AuditPlacement.requestPptFocus = function () {
       return;
     }
 
-    /* ⭐ v6.4 — fallback timeout 1200 → 400 ms.
-       Focus is best-effort; the ACK normally arrives in 150–250 ms. */
+    /* ⭐ v6.6 — fallback timeout 400 → 300 ms. */
     setTimeout(() => {
       window.removeEventListener('message', onAck, false);
       resolve(false);
-    }, 400);
+    }, 300);
   });
 };
 
@@ -108,10 +112,7 @@ window.AuditPlacement.confirmReplace = function (templateLabel) {
   });
 };
 
-/* Ask the extension to show the replace dialog in the source page.
-   ⭐ v6.5 — timeoutMs param (default 2000 ms instead of 30 s).
-   If the source page doesn't answer in time, resolves null so the
-   caller can immediately fall back to the taskpane dialog. */
+/* Ask the extension to show the replace dialog in the source page. */
 window.AuditPlacement.confirmReplaceInSource = function (templateLabel, timeoutMs) {
   const TIMEOUT = typeof timeoutMs === 'number' ? timeoutMs : 2000;
   return new Promise((resolve) => {
@@ -163,17 +164,23 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   const dims = await P.decodeImageDims(dataUrl);
   log(`Image : ${dims.w}×${dims.h} (${tpl.label})`);
 
-  /* Clean orphans */
-  const cleaned = await P.cleanAllOrphans();
-  if (cleaned.ok && cleaned.deleted > 0) {
-    log(`🧹 ${cleaned.deleted} image(s) orpheline(s) nettoyée(s)`);
-  }
+  /* ================================================================
+     ⛔ v6.6 — cleanAllOrphans() et dedupeLastSlide() sont DÉSACTIVÉS
+     dans le flux automatique. Ils supprimaient le template (logo,
+     carte, cartouche) et l'image qu'on venait de coller → boucle
+     infinie → Chrome bloqué.
 
-  /* Fix A — strip images from a freshly-duplicated slide */
-  const deduped = await P.dedupeLastSlide();
-  if (deduped && deduped.cleaned > 0) {
-    log(`🧹 Slide dupliquée détectée — ${deduped.cleaned} image(s) retirée(s)`);
-  }
+     Ils restent disponibles dans slots.js pour un usage manuel.
+     ================================================================ */
+  // const cleaned = await P.cleanAllOrphans();
+  // if (cleaned.ok && cleaned.deleted > 0) {
+  //   log(`🧹 ${cleaned.deleted} image(s) orpheline(s) nettoyée(s)`);
+  // }
+  //
+  // const deduped = await P.dedupeLastSlide();
+  // if (deduped && deduped.cleaned > 0) {
+  //   log(`🧹 Slide dupliquée détectée — ${deduped.cleaned} image(s) retirée(s)`);
+  // }
 
   /* Check for an existing image of the same type on the LAST slide */
   const existing = await P.findExistingOfType(templateKey);
@@ -191,7 +198,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     await P.selectShape(existing.slideNumber, existing.id);
 
     /* ⭐ v6.5 — try the source dialog for 2 s max, then fall back
-       to the taskpane dialog. Fini les 32 secondes d'attente. */
+       to the taskpane dialog. */
     let ok = await P.confirmReplaceInSource(tpl.label, 2000);
 
     if (ok === null) {
@@ -220,8 +227,8 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
       return { retry: false };
     }
 
-    /* ⭐ v6.4 — wait 800 ms (was 2000 ms). */
-    await new Promise((r) => setTimeout(r, 800));
+    /* ⭐ v6.6 — wait 500 ms (was 800 ms). */
+    await new Promise((r) => setTimeout(r, 500));
 
     const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
       ? insertResult.imagesBefore
@@ -277,8 +284,8 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     return { retry: false };
   }
 
-  /* ⭐ v6.4 — wait 800 ms (was 2000 ms). */
-  await new Promise((r) => setTimeout(r, 800));
+  /* ⭐ v6.6 — wait 500 ms (was 800 ms). */
+  await new Promise((r) => setTimeout(r, 500));
 
   const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
     ? insertResult.imagesBefore
