@@ -10,7 +10,7 @@
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
-window.AuditPlacement.insertViaOfficeJs = async function (base64, slideNumber) {
+window.AuditPlacement.insertViaOfficeJs = async function (base64, slideNumber, fitted) {
   const P = window.AuditPlacement;
 
   try {
@@ -29,13 +29,23 @@ window.AuditPlacement.insertViaOfficeJs = async function (base64, slideNumber) {
     }
 
     /* 3) Push the image via Office.js */
-    const dataUrl = 'data:image/png;base64,' + base64;
+    /* ⭐ Office.js Image coercion wants RAW base64 — NOT a data: URL.
+       Passing 'data:image/png;base64,...' makes it fail, which used
+       to trigger the CDP fallback (= switching to the PPT tab). */
+    const raw = base64.replace(/^data:image\/\w+;base64,/, '');
+    const opts = { coercionType: Office.CoercionType.Image };
+    if (fitted) {
+      opts.imageLeft = fitted.x;
+      opts.imageTop = fitted.y;
+      opts.imageWidth = fitted.w;
+      opts.imageHeight = fitted.h;
+    }
 
     const result = await new Promise((resolve) => {
       try {
         Office.context.document.setSelectedDataAsync(
-          dataUrl,
-          { coercionType: Office.CoercionType.Image },
+          raw,
+          opts,
           function (asyncResult) {
             resolve(asyncResult);
           }

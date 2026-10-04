@@ -3,7 +3,18 @@
    ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
-window.AuditPlacement.positionNewImage = async function (slideNumber, fitted, templateKey) {
+/* Poll up to ~6 s: PPT Online can take a while to expose the shape. */
+window.AuditPlacement.positionNewImage = async function (slideNumber, fitted, templateKey, imagesBefore) {
+  let last = { ok: false, reason: 'no new image' };
+  for (let i = 0; i < 6; i++) {
+    last = await window.AuditPlacement._positionOnce(slideNumber, fitted, templateKey, imagesBefore);
+    if (last.ok) return last;
+    await new Promise((r) => setTimeout(r, 1000));
+  }
+  return last;
+};
+
+window.AuditPlacement._positionOnce = async function (slideNumber, fitted, templateKey, imagesBefore) {
   const CFG = window.AuditPlacement.CFG;
 
   try {

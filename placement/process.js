@@ -116,8 +116,6 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
 
     if (ok === null) {
       log('⚠️ Source dialog unreachable — using taskpane dialog');
-      try { window.parent.postMessage({ type: 'AUDIT_REQUEST_FOCUS' }, '*'); } catch (e) {}
-      await new Promise((r) => setTimeout(r, 350));
       ok = await P.confirmReplace(tpl.label);
     }
 
@@ -136,7 +134,11 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     await P.focusSlide(existing.slideNumber);
 
     const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    const insertResult = await P.insertViaPaste(base64, existing.slideNumber);
+    const insertResult = await P.insertViaPaste(base64, existing.slideNumber, fitted);
+
+    if (!insertResult || !insertResult.ok) {
+      return { retry: false };
+    }
 
     /* ⭐ v6.0 — wait 2000 ms, then position with retry */
     await new Promise((r) => setTimeout(r, 2000));
@@ -173,7 +175,11 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   await P.focusSlide(slot.slideNumber);
 
   const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-  const insertResult = await P.insertViaPaste(base64, slot.slideNumber);
+  const insertResult = await P.insertViaPaste(base64, slot.slideNumber, fitted);
+
+  if (!insertResult || !insertResult.ok) {
+    return { retry: false };
+  }
 
   /* ⭐ v6.0 — wait 2000 ms, then position with retry */
   await new Promise((r) => setTimeout(r, 2000));

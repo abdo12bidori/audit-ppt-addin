@@ -12,6 +12,10 @@ window.AuditPlacement.CFG = {
   SLOT_LEFT:  { x: 0,   y: 109, w: 311, h: 250 },
   SLOT_RIGHT: { x: 313, y: 153, w: 391, h: 206 },
 
+  /* false = NEVER switch to the PPT tab (no CDP Ctrl+V fallback).
+     Set to true only if you accept the tab flash as a last resort. */
+  ALLOW_CDP_FALLBACK: false,
+
   NAMESPACE: 'audit-img-',
   RETRY_MS: 3000,
   MAX_PER_SLIDE: 2,

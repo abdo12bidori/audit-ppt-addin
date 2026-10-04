@@ -16,12 +16,12 @@
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
-window.AuditPlacement.insertViaPaste = async function (base64, slideNumber) {
+window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitted) {
   const P = window.AuditPlacement;
   const sourceTabId = window.__auditSourceTabId || null;
 
   /* ── 1) Try the clean path (Office.js — no focus) ── */
-  const officeResult = await P.insertViaOfficeJs(base64, slideNumber);
+  const officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted);
 
   if (officeResult && officeResult.ok) {
     /* Success — notify the extension so it can show a toast */
@@ -46,7 +46,14 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber) {
     };
   }
 
-  /* ── 2) Fallback: CDP Ctrl+V ── */
+  /* ── 2) No-focus mode: do NOT touch the PPT tab ── */
+  if (!P.CFG.ALLOW_CDP_FALLBACK) {
+    log('❌ Insertion Office.js échouée — fallback CDP désactivé (pas de changement d\'onglet)', 'err');
+    setStatus('❌ Insertion échouée : ' + (officeResult && officeResult.reason || '?'), 'err');
+    return { ok: false, method: 'none', imagesBefore: null };
+  }
+
+  /* ── 3) Fallback: CDP Ctrl+V (switches tab briefly) ── */
   log('↩️ Fallback CDP (Office.js a échoué)', 'err');
   await P.insertViaCdpPaste(base64);
 
