@@ -1,10 +1,11 @@
 /* ================================================================
-   Audit Capture — PowerPoint Add-in v6.1
+   Audit Capture — PowerPoint Add-in v6.2
    ----------------------------------------------------------------
-   UI only. All placement logic lives in placement/*.js.
+   UI only. Placement logic lives in placement/*.js.
 
-   v6.1: stores the sourceTabId sent by the extension so paste.js
-         can return it to the background (fix for focus restore).
+   v6.2:
+     • Same as v6.1. Audio notification on success removed;
+       source-page toast is now handled by the extension.
 ================================================================ */
 
 const state = { imagesPlaced: 0 };
@@ -41,17 +42,14 @@ Office.onReady((info) => {
   }
 
   const templates = window.AuditTemplates.getList();
-  log(`Add-in v6.1 démarré — ${templates.length} catégorie(s) : ${templates.map(t => t.label).join(', ')}`);
+  log(`Add-in v6.2 démarré — ${templates.length} catégorie(s) : ${templates.map(t => t.label).join(', ')}`);
   setStatus('Prêt ✅ En attente de l\'extension…', 'ok');
 
-  /* Listen for images from the extension */
   window.addEventListener('message', (e) => {
     if (!e.data || e.data.type !== 'AUDIT_ADD_IMAGE') return;
     const mode = e.data.mode || 'normal';
     const templateKey = e.data.template || 'street';
 
-    /* ⭐ FIX C — store the source tab id so paste.js can return
-       it to the background for focus restore. */
     if (e.data.sourceTabId) {
       window.__auditSourceTabId = e.data.sourceTabId;
     }
@@ -60,14 +58,12 @@ Office.onReady((info) => {
     window.AuditPlacement.enqueueImage(e.data.dataUrl, templateKey);
   });
 
-  /* Direct call */
   window.__auditPlaceImage = (dataUrl, templateKey, sourceTabId) => {
     if (sourceTabId) window.__auditSourceTabId = sourceTabId;
     log(`Image reçue (direct, template=${templateKey || 'street'})`);
     window.AuditPlacement.enqueueImage(dataUrl, templateKey || 'street');
   };
 
-  /* Query API */
   window.__auditQuerySlide = async () => ({ ok: true, summary: 'Prêt' });
 
   setTimeout(refreshStats, 1500);
@@ -92,7 +88,7 @@ async function refreshStats() {
 }
 
 /* ================================================================
-   RESET button
+   RESET
 ================================================================ */
 const resetBtn = document.getElementById('reset');
 if (resetBtn) {
@@ -111,7 +107,7 @@ if (resetBtn) {
 }
 
 /* ================================================================
-   MEASURE button
+   MEASURE
 ================================================================ */
 const measureBtn = document.getElementById('measure');
 const measureOut = document.getElementById('measure-output');
@@ -128,7 +124,6 @@ if (measureBtn && measureOut) {
         await context.sync();
 
         const out = [];
-
         for (let si = 0; si < slides.items.length; si++) {
           const slide = slides.items[si];
           slide.shapes.load('items');
@@ -149,14 +144,10 @@ if (measureBtn && measureOut) {
             } catch (e) {}
 
             out.push({
-              slide: si + 1,
-              idx: i,
-              name: s.name || '(unnamed)',
-              type: s.type,
-              left: Math.round(s.left ?? 0),
-              top: Math.round(s.top ?? 0),
-              w: Math.round(s.width ?? 0),
-              h: Math.round(s.height ?? 0),
+              slide: si + 1, idx: i,
+              name: s.name || '(unnamed)', type: s.type,
+              left: Math.round(s.left ?? 0), top: Math.round(s.top ?? 0),
+              w: Math.round(s.width ?? 0), h: Math.round(s.height ?? 0),
               text: text,
             });
           }
@@ -167,17 +158,11 @@ if (measureBtn && measureOut) {
       let txt = `Total: ${result.length} formes\n\n`;
       txt += 'slide | idx | name                     | type | left | top  | w    | h\n';
       txt += '------+-----+--------------------------+------+------+------+------+------\n';
-
       for (const r of result) {
         txt += `${String(r.slide).padEnd(5)} | ${String(r.idx).padEnd(3)} | ${r.name.substring(0, 24).padEnd(24)} | ${String(r.type).padEnd(4)} | ${String(r.left).padEnd(4)} | ${String(r.top).padEnd(4)} | ${String(r.w).padEnd(4)} | ${r.h}\n`;
-        if (r.text) {
-          txt += `      |     | text: "${r.text}"\n`;
-        }
+        if (r.text) txt += `      |     | text: "${r.text}"\n`;
       }
-
-      txt += '\n\n--- JSON ---\n';
-      txt += JSON.stringify(result, null, 2);
-
+      txt += '\n\n--- JSON ---\n' + JSON.stringify(result, null, 2);
       measureOut.textContent = txt;
       log(`📐 ${result.length} formes mesurées`);
     } catch (e) {
