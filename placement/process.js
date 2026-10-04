@@ -1,7 +1,7 @@
 /* ================================================================
    Placement — Process one image end to end
    ----------------------------------------------------------------
-   v6.1:
+   v6.0:
      • Reads imagesBefore from insertViaPaste's result and passes
        it to positionNewImage.
      • Waits 2000 ms (instead of 1200 ms) before positioning.
@@ -12,9 +12,13 @@
    v6.3:
      • NEW — requestPptFocus(): asks the extension to bring the
        PowerPoint tab to the front BEFORE showing the "Replace?"
-       dialog and BEFORE duplicating a full slide, so the user can
-       actually see what they are about to replace / which slide
-       is being created.
+       dialog and BEFORE duplicating a full slide.
+
+   v6.4 — SPEED:
+     • requestPptFocus fallback timeout: 1200 → 400 ms.
+     • Initial wait before positionNewImage: 2000 → 800 ms
+       (positionNewImage already retries up to 6 s, so a shorter
+        first wait costs nothing in reliability).
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
@@ -22,7 +26,7 @@ window.AuditPlacement = window.AuditPlacement || {};
    Ask the extension to bring the PowerPoint tab to the front.
    Used before showing "Replace?" and before duplicating a slide
    so the user can SEE the slide in PPT while deciding.
-   Resolves true if focus was granted (or after a 1.2s timeout).
+   Resolves true if focus was granted (or after a 400 ms timeout).
 ================================================================ */
 window.AuditPlacement.requestPptFocus = function () {
   return new Promise((resolve) => {
@@ -48,11 +52,12 @@ window.AuditPlacement.requestPptFocus = function () {
       return;
     }
 
-    /* If the relay never acks, don't block the flow forever */
+    /* ⭐ v6.4 — fallback timeout reduced from 1200 to 400 ms.
+       Focus is best-effort; the ACK normally arrives in 150–250 ms. */
     setTimeout(() => {
       window.removeEventListener('message', onAck, false);
       resolve(false);
-    }, 1200);
+    }, 400);
   });
 };
 
@@ -195,8 +200,9 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
       return { retry: false };
     }
 
-    /* ⭐ v6.0 — wait 2000 ms, then position with retry */
-    await new Promise((r) => setTimeout(r, 2000));
+    /* ⭐ v6.4 — wait 800 ms (was 2000 ms). positionNewImage already
+       retries up to 6 s, so a shorter first wait costs nothing. */
+    await new Promise((r) => setTimeout(r, 800));
 
     const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
       ? insertResult.imagesBefore
@@ -252,8 +258,9 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     return { retry: false };
   }
 
-  /* ⭐ v6.0 — wait 2000 ms, then position with retry */
-  await new Promise((r) => setTimeout(r, 2000));
+  /* ⭐ v6.4 — wait 800 ms (was 2000 ms). positionNewImage already
+     retries up to 6 s, so a shorter first wait costs nothing. */
+  await new Promise((r) => setTimeout(r, 800));
 
   const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
     ? insertResult.imagesBefore
