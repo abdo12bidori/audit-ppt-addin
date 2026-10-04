@@ -160,6 +160,33 @@ window.AuditPlacement.confirmReplaceInSource = function (templateLabel, timeoutM
   });
 };
 
+/* Toast in the source page — sent ONLY when the image is really in place
+   (not when it is merely sent), so the message matches what you see. */
+/* Which configured slot does this rectangle belong to? (largest overlap) */
+window.AuditPlacement.slotRectFor = function (rect) {
+  const CFG = window.AuditPlacement.CFG;
+  const inter = (a, b) => {
+    const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return w > 0 && h > 0 ? w * h : 0;
+  };
+  const l = inter(rect, CFG.SLOT_LEFT);
+  const r = inter(rect, CFG.SLOT_RIGHT);
+  if (l === 0 && r === 0) return rect;          /* outside both slots → keep old rect */
+  return l >= r ? CFG.SLOT_LEFT : CFG.SLOT_RIGHT;
+};
+
+window.AuditPlacement.toast = function (text) {
+  try {
+    window.parent.postMessage({
+      type: 'AUDIT_SHOW_TOAST',
+      text: text,
+      sourceTabId: window.__auditSourceTabId || null,
+      ts: Date.now(),
+    }, '*');
+  } catch (e) {}
+};
+
 window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   const P = window.AuditPlacement;
   const CFG = P.CFG;
@@ -196,8 +223,18 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     if (pptFront && !CFG.CONFIRM_IN_SOURCE) {
       ok = await tp;
     } else {
-      const src = P.confirmReplaceInSource(tpl.label, CFG.CONFIRM_TIMEOUT_MS)
-        .then((v) => (v === null ? new Promise(() => {}) : v));   /* ignore timeout */
+      /* The source-page dialog goes through a slow relay, so it used to
+         pop up AFTER you had already answered in the taskpane. Now it is
+         only requested if the taskpane has not been answered after 1.2 s. */
+      let answered = false;
+      tp.then(() => { answered = true; });
+      const src = new Promise((resolve) => {
+        setTimeout(() => {
+          if (answered) return;                     /* never fire a stale dialog */
+          P.confirmReplaceInSource(tpl.label, CFG.CONFIRM_TIMEOUT_MS)
+            .then((v) => { if (v !== null) resolve(v); });
+        }, 1200);
+      });
       ok = await Promise.race([tp, src]);
       const dlg = document.getElementById('audit-confirm');
       if (dlg) dlg.remove();
@@ -212,7 +249,12 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
 
     /* ⭐ NOTHING IS LOST: insert the NEW image first, verify it, and only
        then delete the old one. If anything fails the old image stays. */
-    const fitted = P.containFit(ex.rect, dims.w, dims.h);
+    /* ⭐ Fit into the SLOT the old image belongs to — NOT into the old
+       image's own (already shrunk) rectangle, which made every replacement
+       smaller and ignored the slot measurements. */
+    const slotRect = P.slotRectFor(ex.rect);
+    const fitted = P.containFit(slotRect, dims.w, dims.h);
+    log(`Fit (slot ${slotRect === CFG.SLOT_LEFT ? 'gauche' : slotRect === CFG.SLOT_RIGHT ? 'droite' : 'inconnu'}) : ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)} @ (${fitted.x.toFixed(0)},${fitted.y.toFixed(0)})`);
 
     const ins = await P.insertViaPaste(base64, scan.slideNumber, fitted, { skipPrep: true });
     if (!ins || !ins.ok) {
@@ -231,6 +273,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     const del = await P.deleteShapeFast(scan.slideId, ex.id);
     if (del.ok) log('🗑 Ancienne image supprimée (après succès)');
     log(`✅ Image remplacée (slide ${scan.slideNumber}) — ${Date.now() - t0} ms`, 'ok');
+    P.toast('✅ Image remplacée');
     setStatus('✅ Image remplacée', 'ok');
     return { retry: false };
   }
@@ -279,6 +322,7 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   const pos = await P.positionNewFast(scan.slideId, scan.ids, fitted, templateKey);
   if (pos.ok) {
     log(`✅ Image placée (slide ${scan.slideNumber}, ${scan.slot.slot}) — ${Date.now() - t0} ms`, 'ok');
+    P.toast(`✅ Image placée (slide ${scan.slideNumber})`);
     P.state.imagesPlaced = (P.state.imagesPlaced || 0) + 1;
     setStatus(`✅ Image placée (slide ${scan.slideNumber})`, 'ok');
   } else {

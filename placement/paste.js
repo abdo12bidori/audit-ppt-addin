@@ -52,15 +52,7 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
     log(`⚡ v7.0 — CDP direct path (userOnPpt=${userOnPpt}, forced=${opts.skipOfficeJs === true})`);
     await P.insertViaCdpPaste(base64);
 
-    /* Notify the extension */
-    try {
-      window.parent.postMessage({
-        type: 'AUDIT_SHOW_TOAST',
-        text: '✅ Image envoyée (CDP rapide)',
-        sourceTabId: sourceTabId,
-        ts: Date.now(),
-      }, '*');
-    } catch (e) {}
+    /* (toast now sent by process.js once the image is really placed) */
 
     return {
       ok: true,
@@ -78,14 +70,7 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
   }
 
   if (officeResult && officeResult.ok) {
-    try {
-      window.parent.postMessage({
-        type: 'AUDIT_SHOW_TOAST',
-        text: '✅ Image insérée dans PowerPoint',
-        sourceTabId: sourceTabId,
-        ts: Date.now(),
-      }, '*');
-    } catch (e) {}
+    /* (toast now sent by process.js once the image is really placed) */
 
     return {
       ok: true,
@@ -108,14 +93,7 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
   log('↩️ Fallback CDP (Office.js a échoué)', 'err');
   await P.insertViaCdpPaste(base64);
 
-  try {
-    window.parent.postMessage({
-      type: 'AUDIT_SHOW_TOAST',
-      text: '✅ Image envoyée (méthode CDP)',
-      sourceTabId: sourceTabId,
-      ts: Date.now(),
-    }, '*');
-  } catch (e) {}
+    /* (toast now sent by process.js once the image is really placed) */
 
   /* CDP path doesn't provide a reliable imagesBefore count — the
      canvas-pasted image often appears with a random name. Return
