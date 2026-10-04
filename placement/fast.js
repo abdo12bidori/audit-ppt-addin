@@ -45,6 +45,55 @@ if (typeof Office !== 'undefined' && Office.onReady) {
   Office.onReady(() => { window.AuditPlacement.initBaseline(); });
 }
 
+/* ================================================================
+   Delete non-audit, text-free shapes that sit in the image slots.
+   Returns the remaining shapes list. Safe by design: text shapes,
+   groups, tables and lines are never deleted.
+================================================================ */
+window.AuditPlacement._clearSlotJunk = async function (context, shapes) {
+  const P = window.AuditPlacement;
+  const CFG = P.CFG;
+  const inter = (a, b) => {
+    const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
+    const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
+    return w > 0 && h > 0 ? w * h : 0;
+  };
+  const NEVER = new Set(['group', 'table', 'line', 'unsupported']);
+  const MAYBE_TEXT = new Set(['geometricshape', 'placeholder', 'textbox', 'freeform', 'callout']);
+
+  const cands = shapes.filter((s) => {
+    if ((s.name || '').startsWith(CFG.NAMESPACE)) return false;
+    const t = String(s.type || '').toLowerCase();
+    if (NEVER.has(t)) return false;
+    const r = { x: s.left ?? 0, y: s.top ?? 0, w: s.width ?? 0, h: s.height ?? 0 };
+    const area = r.w * r.h;
+    if (area <= 0) return false;
+    const covered = inter(r, CFG.SLOT_LEFT) + inter(r, CFG.SLOT_RIGHT);
+    return covered / area >= CFG.CLEAN_MIN_COVERAGE;
+  });
+  if (cands.length === 0) return shapes;
+
+  /* text check — only for shapes that can hold text */
+  const textual = cands.filter((s) => MAYBE_TEXT.has(String(s.type || '').toLowerCase()));
+  textual.forEach((s) => s.textFrame.load('hasText'));
+  let textOk = true;
+  try { await context.sync(); } catch (e) { textOk = false; }
+
+  const toDelete = cands.filter((s) => {
+    if (!MAYBE_TEXT.has(String(s.type || '').toLowerCase())) return true;
+    if (!textOk) return false;                    /* unsure → keep */
+    try { return !s.textFrame.hasText; } catch (e) { return false; }
+  });
+  if (toDelete.length === 0) return shapes;
+
+  toDelete.forEach((s) => s.delete());
+  await context.sync();
+  const gone = new Set(toDelete.map((s) => s.id));
+  log(`🧹 ${toDelete.length} élément(s) retiré(s) des emplacements : ` +
+      toDelete.map((s) => `${s.type}"${s.name || ''}"`).join(', '));
+  return shapes.filter((s) => !gone.has(s.id));
+};
+
 /* Scan ONLY the last slide, select it, and return everything the
    flow needs: existing image of this type, free slot, shape ids. */
 window.AuditPlacement.scanLast = async function (templateKey) {
@@ -82,6 +131,11 @@ window.AuditPlacement.scanLast = async function (templateKey) {
         shapes = shapes.filter((s) => !gone.has(s.id));
         log(`📑 Slide dupliquée manuellement — ${copies.length} image(s) copiée(s) retirée(s)`);
       }
+    }
+
+    /* ⭐ delete whatever occupies the slots (see CFG.CLEAN_SLOTS) */
+    if (CFG.CLEAN_SLOTS) {
+      shapes = await P._clearSlotJunk(context, shapes);
     }
 
     const audit = shapes.filter(

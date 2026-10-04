@@ -48,6 +48,15 @@ window.AuditPlacement.CFG = {
   AUTO_DUPLICATE: false,
   WAIT_DUPLICATE_MS: 0,        /* 0 = wait as long as needed (nothing is dropped) */
 
+  /* ⭐ Clean the slots: anything sitting where the images go (placeholder
+     frame, empty rectangle, old picture…) is deleted BEFORE placing.
+     A shape is removed only if:
+       • at least CLEAN_MIN_COVERAGE of its area lies inside the slots, AND
+       • it carries no text (titles / text boxes are never touched), AND
+       • it is not a group, table or line. */
+  CLEAN_SLOTS: true,
+  CLEAN_MIN_COVERAGE: 0.5,
+
   NAMESPACE: 'audit-img-',
   RETRY_MS: 3000,
   MAX_PER_SLIDE: 2,
