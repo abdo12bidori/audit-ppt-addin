@@ -1,16 +1,17 @@
 /* ================================================================
    Placement — Process one image end to end
    ----------------------------------------------------------------
-   v5.0:
-     • insertViaPaste now takes the target slideNumber so the
-       Office.js path can pre-select it.
-     • Keeps Fix A (dedupeLastSlide) and the source-page replace
-       dialog.
+   v6.0:
+     • Reads imagesBefore from insertViaPaste's result and passes
+       it to positionNewImage.
+     • Waits 2000 ms (instead of 1200 ms) before positioning.
+     • If insertViaOfficeJs succeeded → tries positioning; if the
+       position step still fails, we do a second attempt.
+     • Logs the exact reason of any failure.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
-/* Prompt user for confirmation — shown INSIDE the taskpane (still
-   used as a fallback if the source-page dialog is unreachable). */
+/* Prompt user for confirmation — shown INSIDE the taskpane. */
 window.AuditPlacement.confirmReplace = function (templateLabel) {
   return new Promise((resolve) => {
     const old = document.getElementById('audit-confirm');
@@ -51,13 +52,11 @@ window.AuditPlacement.confirmReplace = function (templateLabel) {
   });
 };
 
-/* Ask the extension to show the replace dialog in the source page.
-   Returns a Promise<boolean>. */
+/* Ask the extension to show the replace dialog in the source page. */
 window.AuditPlacement.confirmReplaceInSource = function (templateLabel) {
   return new Promise((resolve) => {
     const requestId = 'r_' + Date.now() + '_' + Math.random().toString(36).slice(2);
 
-    /* Listen for the answer once */
     const onAnswer = (e) => {
       if (!e.data || e.data.type !== 'AUDIT_REPLACE_ANSWER') return;
       if (e.data.requestId !== requestId) return;
@@ -66,7 +65,6 @@ window.AuditPlacement.confirmReplaceInSource = function (templateLabel) {
     };
     window.addEventListener('message', onAnswer, false);
 
-    /* Send the request */
     try {
       window.parent.postMessage({
         type: 'AUDIT_REPLACE_NEEDED',
@@ -76,11 +74,10 @@ window.AuditPlacement.confirmReplaceInSource = function (templateLabel) {
       }, '*');
     } catch (e) {
       window.removeEventListener('message', onAnswer);
-      resolve(null);  /* null = couldn't reach the source page */
+      resolve(null);
       return;
     }
 
-    /* Timeout after 30s — fall back to taskpane dialog */
     setTimeout(() => {
       window.removeEventListener('message', onAnswer);
       resolve(null);
@@ -115,13 +112,10 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   if (existing) {
     log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${existing.slideNumber})`, 'err');
 
-    /* Try the source-page dialog first */
     let ok = await P.confirmReplaceInSource(tpl.label);
 
-    /* Fallback to the in-taskpane dialog if the source page didn't reply */
     if (ok === null) {
       log('⚠️ Source dialog unreachable — using taskpane dialog');
-      /* Ask the extension for focus so the user sees the dialog */
       try { window.parent.postMessage({ type: 'AUDIT_REQUEST_FOCUS' }, '*'); } catch (e) {}
       await new Promise((r) => setTimeout(r, 350));
       ok = await P.confirmReplace(tpl.label);
@@ -142,14 +136,24 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     await P.focusSlide(existing.slideNumber);
 
     const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    await P.insertViaPaste(base64, existing.slideNumber);
+    const insertResult = await P.insertViaPaste(base64, existing.slideNumber);
 
-    await new Promise((r) => setTimeout(r, 1200));
-    const pos = await P.positionNewImage(existing.slideNumber, fitted, templateKey);
+    /* ⭐ v6.0 — wait 2000 ms, then position with retry */
+    await new Promise((r) => setTimeout(r, 2000));
+
+    const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
+      ? insertResult.imagesBefore
+      : null;
+
+    const pos = await P.positionNewImage(
+      existing.slideNumber, fitted, templateKey, imagesBefore
+    );
 
     if (pos.ok) {
       log(`✅ Image remplacée (slide ${existing.slideNumber})`, 'ok');
       setStatus(`✅ Image remplacée`, 'ok');
+    } else {
+      log(`⚠️ Positionnement échoué : ${pos.reason || pos.error || '?'}`, 'err');
     }
     return { retry: false };
   }
@@ -169,17 +173,25 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   await P.focusSlide(slot.slideNumber);
 
   const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-  await P.insertViaPaste(base64, slot.slideNumber);
+  const insertResult = await P.insertViaPaste(base64, slot.slideNumber);
 
-  await new Promise((r) => setTimeout(r, 1200));
-  const pos = await P.positionNewImage(slot.slideNumber, fitted, templateKey);
+  /* ⭐ v6.0 — wait 2000 ms, then position with retry */
+  await new Promise((r) => setTimeout(r, 2000));
+
+  const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
+    ? insertResult.imagesBefore
+    : null;
+
+  const pos = await P.positionNewImage(
+    slot.slideNumber, fitted, templateKey, imagesBefore
+  );
 
   if (pos.ok) {
     log(`✅ Image placée (slide ${slot.slideNumber}, ${slot.slot})`, 'ok');
     P.state.imagesPlaced = (P.state.imagesPlaced || 0) + 1;
     setStatus(`✅ Image placée (slide ${slot.slideNumber})`, 'ok');
   } else {
-    log(`⚠️ Positionnement échoué`, 'err');
+    log(`⚠️ Positionnement échoué : ${pos.reason || pos.error || '?'}`, 'err');
   }
 
   return { retry: false };
