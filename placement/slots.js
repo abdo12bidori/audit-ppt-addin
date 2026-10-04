@@ -304,3 +304,107 @@ window.AuditPlacement.dedupeLastSlide = async function () {
     return { cleaned: 0, error: e.message };
   }
 };
+
+/* ================================================================
+   Select the existing image on its slide (so the user SEES which
+   image is about to be replaced). Best effort — silently ignored
+   if the API is not available on this PowerPoint version.
+================================================================ */
+window.AuditPlacement.selectShape = async function (slideNumber, shapeId) {
+  try {
+    await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+      const slide = slides.items[slideNumber - 1];
+      if (!slide) return;
+      slide.setSelectedShapes([shapeId]);
+      await context.sync();
+    });
+  } catch (e) { /* not supported — slide selection is enough */ }
+};
+
+/* ================================================================
+   ⭐ Duplicate the LAST slide (used when every slide is full).
+   1) exportAsBase64 + insertSlidesFromBase64 (true duplicate)
+   2) fallback: slides.add() with the same layout/master
+   Then all audit-img-* images are wiped from the new slide so it
+   starts empty. Returns { ok, slideNumber }.
+================================================================ */
+window.AuditPlacement.duplicateLastSlide = async function () {
+  const P = window.AuditPlacement;
+  try {
+    const before = await PowerPoint.run(async (context) => {
+      const slides = context.presentation.slides;
+      slides.load('items');
+      await context.sync();
+      return slides.items.length;
+    });
+    if (before === 0) return { ok: false, reason: 'no slides' };
+
+    let done = false;
+
+    /* 1) True duplicate */
+    try {
+      await PowerPoint.run(async (context) => {
+        const slides = context.presentation.slides;
+        slides.load('items');
+        await context.sync();
+        const last = slides.items[slides.items.length - 1];
+        const b64 = last.exportAsBase64();
+        await context.sync();
+        context.presentation.insertSlidesFromBase64(b64.value, {
+          formatting: 'KeepSourceFormatting',
+          targetSlideId: last.id,
+        });
+        await context.sync();
+      });
+      done = true;
+    } catch (e) {
+      console.warn('[slots] duplicate via base64 failed', e);
+    }
+
+    /* 2) Fallback: new slide with same layout */
+    if (!done) {
+      try {
+        await PowerPoint.run(async (context) => {
+          const slides = context.presentation.slides;
+          slides.load('items');
+          await context.sync();
+          const last = slides.items[slides.items.length - 1];
+          last.layout.load('id');
+          last.slideMaster.load('id');
+          await context.sync();
+          context.presentation.slides.add({
+            layoutId: last.layout.id,
+            slideMasterId: last.slideMaster.id,
+          });
+          await context.sync();
+        });
+        done = true;
+      } catch (e) {
+        return { ok: false, reason: e.message };
+      }
+    }
+
+    /* Wait until the new slide is visible to Office.js */
+    let total = before;
+    for (let i = 0; i < 10 && total <= before; i++) {
+      await new Promise((r) => setTimeout(r, 500));
+      total = await PowerPoint.run(async (context) => {
+        const slides = context.presentation.slides;
+        slides.load('items');
+        await context.sync();
+        return slides.items.length;
+      });
+    }
+    if (total <= before) return { ok: false, reason: 'slide not created' };
+
+    /* Empty the new slide of audit images, then show it */
+    await P.wipeAuditImages(total);
+    await P.focusSlide(total);
+    return { ok: true, slideNumber: total };
+  } catch (e) {
+    return { ok: false, reason: e.message };
+  }
+};

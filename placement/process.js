@@ -112,6 +112,11 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   if (existing) {
     log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${existing.slideNumber})`, 'err');
 
+    /* ⭐ Go to the slide that holds the image (inside PPT — no browser
+       tab switch) and select it so the user sees what will be replaced */
+    await P.focusSlide(existing.slideNumber);
+    await P.selectShape(existing.slideNumber, existing.id);
+
     let ok = await P.confirmReplaceInSource(tpl.label);
 
     if (ok === null) {
@@ -161,7 +166,18 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   }
 
   /* Normal placement */
-  const slot = await P.findFreeSlot();
+  let slot = await P.findFreeSlot();
+  if (!slot) {
+    log('📑 Toutes les slides sont pleines — duplication automatique…');
+    setStatus('📑 Duplication de la slide…');
+    const dup = await P.duplicateLastSlide();
+    if (dup.ok) {
+      log(`✅ Slide ${dup.slideNumber} dupliquée`, 'ok');
+      slot = await P.findFreeSlot();
+    } else {
+      log('⚠️ Duplication échouée : ' + (dup.reason || '?'), 'err');
+    }
+  }
   if (!slot) {
     log('⚠️ Toutes les slides sont pleines', 'err');
     setStatus('⚠️ Slides pleines — dupliquez-en une', 'err');
