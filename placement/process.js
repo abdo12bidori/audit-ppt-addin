@@ -1,15 +1,60 @@
 /* ================================================================
    Placement — Process one image end to end
    ----------------------------------------------------------------
-   v6.0:
+   v6.1:
      • Reads imagesBefore from insertViaPaste's result and passes
        it to positionNewImage.
      • Waits 2000 ms (instead of 1200 ms) before positioning.
      • If insertViaOfficeJs succeeded → tries positioning; if the
        position step still fails, we do a second attempt.
      • Logs the exact reason of any failure.
+
+   v6.3:
+     • NEW — requestPptFocus(): asks the extension to bring the
+       PowerPoint tab to the front BEFORE showing the "Replace?"
+       dialog and BEFORE duplicating a full slide, so the user can
+       actually see what they are about to replace / which slide
+       is being created.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
+
+/* ================================================================
+   Ask the extension to bring the PowerPoint tab to the front.
+   Used before showing "Replace?" and before duplicating a slide
+   so the user can SEE the slide in PPT while deciding.
+   Resolves true if focus was granted (or after a 1.2s timeout).
+================================================================ */
+window.AuditPlacement.requestPptFocus = function () {
+  return new Promise((resolve) => {
+    const requestId = 'f_' + Date.now() + '_' + Math.random().toString(36).slice(2);
+
+    const onAck = (e) => {
+      if (!e.data || e.data.type !== 'AUDIT_FOCUS_ACK') return;
+      if (e.data.requestId !== requestId) return;
+      window.removeEventListener('message', onAck, false);
+      resolve(true);
+    };
+    window.addEventListener('message', onAck, false);
+
+    try {
+      window.parent.postMessage({
+        type: 'AUDIT_REQUEST_FOCUS',
+        requestId: requestId,
+        ts: Date.now(),
+      }, '*');
+    } catch (err) {
+      window.removeEventListener('message', onAck, false);
+      resolve(false);
+      return;
+    }
+
+    /* If the relay never acks, don't block the flow forever */
+    setTimeout(() => {
+      window.removeEventListener('message', onAck, false);
+      resolve(false);
+    }, 1200);
+  });
+};
 
 /* Prompt user for confirmation — shown INSIDE the taskpane. */
 window.AuditPlacement.confirmReplace = function (templateLabel) {
@@ -112,7 +157,12 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   if (existing) {
     log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${existing.slideNumber})`, 'err');
 
-    /* ⭐ Go to the slide that holds the image (inside PPT — no browser
+    /* ⭐ v6.3 — bring PPT to the front BEFORE showing the dialog,
+       so the user actually SEES the slide + selected image they
+       are being asked about. */
+    await P.requestPptFocus();
+
+    /* Go to the slide that holds the image (inside PPT — no browser
        tab switch) and select it so the user sees what will be replaced */
     await P.focusSlide(existing.slideNumber);
     await P.selectShape(existing.slideNumber, existing.id);
@@ -170,6 +220,11 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   if (!slot) {
     log('📑 Toutes les slides sont pleines — duplication automatique…');
     setStatus('📑 Duplication de la slide…');
+
+    /* ⭐ v6.3 — bring PPT to the front so the user sees the new
+       slide appear, then the image land on it. */
+    await P.requestPptFocus();
+
     const dup = await P.duplicateLastSlide();
     if (dup.ok) {
       log(`✅ Slide ${dup.slideNumber} dupliquée`, 'ok');
