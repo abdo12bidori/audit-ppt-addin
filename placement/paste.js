@@ -13,18 +13,66 @@
        `true`, so process.js can pass imagesBefore to
        positionNewImage and reliably find the newly-inserted
        shape (Office.js sometimes takes 2–3 s to reflect it).
+
+   v7.0 — SPEED:
+     • NEW — skipOfficeJs option: when the user is ALREADY on the
+       PPT tab (e.g. just clicked "Remplacer" or triggered a
+       slide duplication), we go straight to CDP Ctrl+V. ~300 ms
+       instead of 2–8 s, no Chrome freeze.
+     • Auto-detects focus state via document.visibilityState and
+       document.hasFocus() to decide which path to take.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
-window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitted) {
+/* Detect if the taskpane's host page is currently focused /
+   visible. When the user just clicked "Remplacer" in the taskpane,
+   the PPT tab IS focused → we can safely use CDP. */
+window.AuditPlacement._isPptFocused = function () {
+  try {
+    if (document.visibilityState !== 'visible') return false;
+    if (typeof document.hasFocus === 'function' && !document.hasFocus()) return false;
+    return true;
+  } catch (e) {
+    return false;
+  }
+};
+
+window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitted, options) {
   const P = window.AuditPlacement;
+  const opts = options || {};
   const sourceTabId = window.__auditSourceTabId || null;
+
+  /* ⭐ v7.0 — decide which path to take */
+  const userOnPpt = P._isPptFocused();
+  const skipOfficeJs =
+    opts.skipOfficeJs === true ||
+    (P.CFG.ALLOW_CDP_FALLBACK && (userOnPpt || P.CFG.PREFER_CDP_ALWAYS));
+
+  if (skipOfficeJs) {
+    log(`⚡ v7.0 — CDP direct path (userOnPpt=${userOnPpt}, forced=${opts.skipOfficeJs === true})`);
+    await P.insertViaCdpPaste(base64);
+
+    /* Notify the extension */
+    try {
+      window.parent.postMessage({
+        type: 'AUDIT_SHOW_TOAST',
+        text: '✅ Image envoyée (CDP rapide)',
+        sourceTabId: sourceTabId,
+        ts: Date.now(),
+      }, '*');
+    } catch (e) {}
+
+    return {
+      ok: true,
+      method: 'cdp',
+      imagesBefore: null,
+    };
+  }
 
   /* ── 1) Try the clean path (Office.js — no focus) ── */
   const officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted);
 
   if (officeResult && officeResult.ok) {
-    /* Success — notify the extension so it can show a toast */
     try {
       window.parent.postMessage({
         type: 'AUDIT_SHOW_TOAST',
@@ -34,8 +82,6 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
       }, '*');
     } catch (e) {}
 
-    /* ⭐ v6.0 — return imagesBefore so process.js can locate the
-       newly-inserted shape reliably. */
     return {
       ok: true,
       method: 'officejs',
@@ -57,7 +103,6 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
   log('↩️ Fallback CDP (Office.js a échoué)', 'err');
   await P.insertViaCdpPaste(base64);
 
-  /* Notify the extension of the fallback path */
   try {
     window.parent.postMessage({
       type: 'AUDIT_SHOW_TOAST',

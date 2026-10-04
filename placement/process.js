@@ -25,11 +25,17 @@
      • ⛔ cleanAllOrphans() and dedupeLastSlide() are NO LONGER
        called automatically in processOneImage. They were deleting
        the template images (logo, map, title cartouche) AND the
-       image that had just been pasted (which has no audit-img-*
-       name yet). Result: infinite loop, Chrome frozen.
-       They remain available for manual invocation.
-     • requestPptFocus timeout: 400 → 300 ms.
-     • Initial wait before positionNewImage: 800 → 500 ms.
+       image that had just been pasted. They remain available for
+       manual invocation.
+
+   v7.0 — CDP FAST PATH:
+     • Replace flow: after requestPptFocus() + "Remplacer" click,
+       the user is on PPT. We pass { skipOfficeJs: true } to
+       insertViaPaste → CDP Ctrl+V directly (~300 ms).
+     • Duplicate-slide flow: after requestPptFocus() +
+       duplicateLastSlide(), same thing — the insertion uses CDP.
+     • insertViaPaste also auto-detects focus and chooses CDP if
+       the user happens to be on PPT already.
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
@@ -166,39 +172,20 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
 
   /* ================================================================
      ⛔ v6.6 — cleanAllOrphans() et dedupeLastSlide() sont DÉSACTIVÉS
-     dans le flux automatique. Ils supprimaient le template (logo,
-     carte, cartouche) et l'image qu'on venait de coller → boucle
-     infinie → Chrome bloqué.
-
-     Ils restent disponibles dans slots.js pour un usage manuel.
+     dans le flux automatique.
      ================================================================ */
-  // const cleaned = await P.cleanAllOrphans();
-  // if (cleaned.ok && cleaned.deleted > 0) {
-  //   log(`🧹 ${cleaned.deleted} image(s) orpheline(s) nettoyée(s)`);
-  // }
-  //
-  // const deduped = await P.dedupeLastSlide();
-  // if (deduped && deduped.cleaned > 0) {
-  //   log(`🧹 Slide dupliquée détectée — ${deduped.cleaned} image(s) retirée(s)`);
-  // }
 
   /* Check for an existing image of the same type on the LAST slide */
   const existing = await P.findExistingOfType(templateKey);
   if (existing) {
     log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${existing.slideNumber})`, 'err');
 
-    /* ⭐ v6.3 — bring PPT to the front BEFORE showing the dialog,
-       so the user actually SEES the slide + selected image they
-       are being asked about. */
+    /* ⭐ v6.3 — bring PPT to the front BEFORE showing the dialog. */
     await P.requestPptFocus();
 
-    /* Go to the slide that holds the image (inside PPT — no browser
-       tab switch) and select it so the user sees what will be replaced */
     await P.focusSlide(existing.slideNumber);
     await P.selectShape(existing.slideNumber, existing.id);
 
-    /* ⭐ v6.5 — try the source dialog for 2 s max, then fall back
-       to the taskpane dialog. */
     let ok = await P.confirmReplaceInSource(tpl.label, 2000);
 
     if (ok === null) {
@@ -221,14 +208,23 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     await P.focusSlide(existing.slideNumber);
 
     const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-    const insertResult = await P.insertViaPaste(base64, existing.slideNumber, fitted);
+
+    /* ⭐ v7.0 — user just answered the Replace dialog and PPT is
+       in front → CDP Ctrl+V directly (~300 ms instead of 2–8 s). */
+    const insertResult = await P.insertViaPaste(
+      base64,
+      existing.slideNumber,
+      fitted,
+      { skipOfficeJs: true }
+    );
 
     if (!insertResult || !insertResult.ok) {
       return { retry: false };
     }
 
-    /* ⭐ v6.6 — wait 500 ms (was 800 ms). */
-    await new Promise((r) => setTimeout(r, 500));
+    /* ⭐ v7.0 — CDP path benefits from a short settle before
+       polling. 300 ms is enough on most tenants. */
+    await new Promise((r) => setTimeout(r, 300));
 
     const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
       ? insertResult.imagesBefore
@@ -254,7 +250,9 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
     setStatus('📑 Duplication de la slide…');
 
     /* ⭐ v6.3 — bring PPT to the front so the user sees the new
-       slide appear, then the image land on it. */
+       slide appear, then the image land on it.
+       ⭐ v7.0 — this is also what makes the CDP fast path valid
+       right after: the user is now on PPT. */
     await P.requestPptFocus();
 
     const dup = await P.duplicateLastSlide();
@@ -278,14 +276,19 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   await P.focusSlide(slot.slideNumber);
 
   const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+
+  /* ⭐ v7.0 — if the user was brought to PPT by the duplicate-slide
+     flow, or if they are already on PPT for any reason, go
+     straight to CDP. insertViaPaste auto-detects this. */
   const insertResult = await P.insertViaPaste(base64, slot.slideNumber, fitted);
 
   if (!insertResult || !insertResult.ok) {
     return { retry: false };
   }
 
-  /* ⭐ v6.6 — wait 500 ms (was 800 ms). */
-  await new Promise((r) => setTimeout(r, 500));
+  /* ⭐ v7.0 — short settle: 300 ms for CDP, 500 ms for Office.js. */
+  const settleMs = insertResult.method === 'cdp' ? 300 : 500;
+  await new Promise((r) => setTimeout(r, settleMs));
 
   const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
     ? insertResult.imagesBefore

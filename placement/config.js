@@ -12,9 +12,27 @@ window.AuditPlacement.CFG = {
   SLOT_LEFT:  { x: 0,   y: 109, w: 311, h: 250 },
   SLOT_RIGHT: { x: 313, y: 153, w: 391, h: 206 },
 
-  /* false = NEVER switch to the PPT tab (no CDP Ctrl+V fallback).
-     Set to true only if you accept the tab flash as a last resort. */
-  ALLOW_CDP_FALLBACK: false,
+  /* ⭐ v7 — CDP fallback settings.
+
+     ALLOW_CDP_FALLBACK:
+       true  = if insertViaOfficeJs fails, use CDP Ctrl+V.
+       false = never touch the PPT tab; if Office.js fails, we
+               simply give up.
+
+     PREFER_CDP_ALWAYS:
+       true  = always use CDP Ctrl+V, even when the user is NOT
+               on the PPT tab (still works, just brings the tab
+               forward briefly).
+       false = let the orchestrator decide based on focus:
+               if the user is already on PPT → CDP (~300 ms)
+               if the user is on BAN/maps → Office.js first
+
+     In all cases, the "Replace?" and "Duplicate slide" flows
+     pass { skipOfficeJs: true } because the user has just been
+     brought to PPT by requestPptFocus() — so CDP is the fast
+     and safe path there. */
+  ALLOW_CDP_FALLBACK: true,
+  PREFER_CDP_ALWAYS: false,
 
   NAMESPACE: 'audit-img-',
   RETRY_MS: 3000,
