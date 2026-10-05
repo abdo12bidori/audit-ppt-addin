@@ -10,17 +10,22 @@
 ================================================================ */
 window.AuditPlacement = window.AuditPlacement || {};
 
-window.AuditPlacement.insertViaOfficeJs = async function (base64, slideNumber, fitted, o) {
-  o = o || {};
+window.AuditPlacement.insertViaOfficeJs = async function (base64, slideNumber, fitted) {
   const P = window.AuditPlacement;
 
   try {
-    /* 1+2) Pre-select + count — skipped in the fast flow (scanLast
-       already selected the slide and recorded the shape ids). */
+    /* 1) Pre-select the target slide WITHOUT bringing PPT to front */
+    if (slideNumber && P.focusSlide) {
+      await P.focusSlide(slideNumber);
+    }
+
+    /* 2) Count existing images on the target slide (before insert) */
     let imagesBefore = 0;
-    if (!o.skipPrep) {
-      if (slideNumber && P.focusSlide) await P.focusSlide(slideNumber);
-      try { imagesBefore = await P._countImagesOnSlide(slideNumber); } catch (e) {}
+    try {
+      imagesBefore = await P._countImagesOnSlide(slideNumber);
+      log(`📸 Images avant insertion sur slide ${slideNumber} : ${imagesBefore}`);
+    } catch (e) {
+      console.warn('[insert] count before failed', e);
     }
 
     /* 3) Push the image via Office.js */

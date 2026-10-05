@@ -73,7 +73,7 @@ window.AuditPlacement.requestPptFocus = function () {
     setTimeout(() => {
       window.removeEventListener('message', onAck, false);
       resolve(false);
-    }, 1500);
+    }, 300);
   });
 };
 
@@ -160,33 +160,6 @@ window.AuditPlacement.confirmReplaceInSource = function (templateLabel, timeoutM
   });
 };
 
-/* Toast in the source page — sent ONLY when the image is really in place
-   (not when it is merely sent), so the message matches what you see. */
-/* Which configured slot does this rectangle belong to? (largest overlap) */
-window.AuditPlacement.slotRectFor = function (rect) {
-  const CFG = window.AuditPlacement.CFG;
-  const inter = (a, b) => {
-    const w = Math.min(a.x + a.w, b.x + b.w) - Math.max(a.x, b.x);
-    const h = Math.min(a.y + a.h, b.y + b.h) - Math.max(a.y, b.y);
-    return w > 0 && h > 0 ? w * h : 0;
-  };
-  const l = inter(rect, CFG.SLOT_LEFT);
-  const r = inter(rect, CFG.SLOT_RIGHT);
-  if (l === 0 && r === 0) return rect;          /* outside both slots → keep old rect */
-  return l >= r ? CFG.SLOT_LEFT : CFG.SLOT_RIGHT;
-};
-
-window.AuditPlacement.toast = function (text) {
-  try {
-    window.parent.postMessage({
-      type: 'AUDIT_SHOW_TOAST',
-      text: text,
-      sourceTabId: window.__auditSourceTabId || null,
-      ts: Date.now(),
-    }, '*');
-  } catch (e) {}
-};
-
 window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   const P = window.AuditPlacement;
   const CFG = P.CFG;
@@ -197,48 +170,27 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
   const dims = await P.decodeImageDims(dataUrl);
   log(`Image : ${dims.w}×${dims.h} (${tpl.label})`);
 
-  const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
-  const t0 = Date.now();
+  /* ================================================================
+     ⛔ v6.6 — cleanAllOrphans() et dedupeLastSlide() sont DÉSACTIVÉS
+     dans le flux automatique.
+     ================================================================ */
 
-  /* ⚡ ONE scan of the LAST slide (also selects it) */
-  let scan = await P.scanLast(templateKey);
-  if (!scan) { log('❌ Aucune slide', 'err'); return { retry: false }; }
+  /* Check for an existing image of the same type on the LAST slide */
+  const existing = await P.findExistingOfType(templateKey);
+  if (existing) {
+    log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${existing.slideNumber})`, 'err');
 
-  /* ───────────── Same type already there → replace ───────────── */
-  if (scan.existing) {
-    const ex = scan.existing;
-    log(`⚠️ Une image "${tpl.label}" existe déjà (slide ${scan.slideNumber})`, 'err');
+    /* ⭐ v6.3 — bring PPT to the front BEFORE showing the dialog. */
+    await P.requestPptFocus();
 
-    const pptFront = await P.requestPptFocus();
-    await P.selectShape(scan.slideNumber, ex.id);
+    await P.focusSlide(existing.slideNumber);
+    await P.selectShape(existing.slideNumber, existing.id);
 
-    /* ⭐ The user is on the PPT tab (focus requested), so the dialog
-       MUST appear there immediately. The old code waited up to 60 s for
-       an answer from the source page the user could not see → the UI
-       looked frozen. Now: taskpane dialog at once; the source-page
-       dialog only runs in parallel if the ack failed or CONFIRM_IN_SOURCE
-       is on, and the first answer wins. */
-    let ok;
-    const tp = P.confirmReplace(tpl.label);
-    if (pptFront && !CFG.CONFIRM_IN_SOURCE) {
-      ok = await tp;
-    } else {
-      /* The source-page dialog goes through a slow relay, so it used to
-         pop up AFTER you had already answered in the taskpane. Now it is
-         only requested if the taskpane has not been answered after 1.2 s. */
-      let answered = false;
-      tp.then(() => { answered = true; });
-      const src = new Promise((resolve) => {
-        setTimeout(() => {
-          if (answered) return;                     /* never fire a stale dialog */
-          P.confirmReplaceInSource(tpl.label, CFG.CONFIRM_TIMEOUT_MS)
-            .then((v) => { if (v !== null) resolve(v); });
-        }, 1200);
-      });
-      ok = await Promise.race([tp, src]);
-      const dlg = document.getElementById('audit-confirm');
-      if (dlg) dlg.remove();
-      try { window.parent.postMessage({ type: 'AUDIT_REPLACE_CANCEL', ts: Date.now() }, '*'); } catch (e) {}
+    let ok = await P.confirmReplaceInSource(tpl.label, 2000);
+
+    if (ok === null) {
+      log('⚠️ Source dialog unreachable / timeout (2s) — using taskpane dialog');
+      ok = await P.confirmReplace(tpl.label);
     }
 
     if (!ok) {
@@ -247,86 +199,112 @@ window.AuditPlacement.processOneImage = async function (dataUrl, templateKey) {
       return { retry: false };
     }
 
-    /* ⭐ NOTHING IS LOST: insert the NEW image first, verify it, and only
-       then delete the old one. If anything fails the old image stays. */
-    /* ⭐ Fit into the SLOT the old image belongs to — NOT into the old
-       image's own (already shrunk) rectangle, which made every replacement
-       smaller and ignored the slot measurements. */
-    const slotRect = P.slotRectFor(ex.rect);
-    const fitted = P.containFit(slotRect, dims.w, dims.h);
-    log(`Fit (slot ${slotRect === CFG.SLOT_LEFT ? 'gauche' : slotRect === CFG.SLOT_RIGHT ? 'droite' : 'inconnu'}) : ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)} @ (${fitted.x.toFixed(0)},${fitted.y.toFixed(0)})`);
+    const w = await P.deleteShapeById(existing.slideNumber, existing.id);
+    if (w.ok) log(`🗑 Ancienne image supprimée`);
 
-    const ins = await P.insertViaPaste(base64, scan.slideNumber, fitted, { skipPrep: true });
-    if (!ins || !ins.ok) {
-      log('❌ Insertion échouée — ancienne image CONSERVÉE (image gardée pour réessayer)', 'err');
-      setStatus('❌ Échec — ancienne image conservée', 'err');
-      return { retry: false, keep: true };
-    }
+    const fitted = P.containFit(existing.rect, dims.w, dims.h);
+    log(`Fit : ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)}`);
 
-    const pos = await P.positionNewFast(scan.slideId, scan.ids, fitted, templateKey);
-    if (!pos.ok) {
-      log('⚠️ Nouvelle image introuvable — ancienne image CONSERVÉE, vérifiez la slide', 'err');
-      setStatus('⚠️ Vérifiez la slide (ancienne image conservée)', 'err');
+    await P.focusSlide(existing.slideNumber);
+
+    const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+
+    /* ⭐ v7.0 — user just answered the Replace dialog and PPT is
+       in front → CDP Ctrl+V directly (~300 ms instead of 2–8 s). */
+    const insertResult = await P.insertViaPaste(
+      base64,
+      existing.slideNumber,
+      fitted,
+      { skipOfficeJs: true }
+    );
+
+    if (!insertResult || !insertResult.ok) {
       return { retry: false };
     }
 
-    const del = await P.deleteShapeFast(scan.slideId, ex.id);
-    if (del.ok) log('🗑 Ancienne image supprimée (après succès)');
-    log(`✅ Image remplacée (slide ${scan.slideNumber}) — ${Date.now() - t0} ms`, 'ok');
-    P.toast('✅ Image envoyée — remplacée');
-    setStatus('✅ Image remplacée', 'ok');
+    /* ⭐ v7.0 — CDP path benefits from a short settle before
+       polling. 300 ms is enough on most tenants. */
+    await new Promise((r) => setTimeout(r, 300));
+
+    const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
+      ? insertResult.imagesBefore
+      : null;
+
+    const pos = await P.positionNewImage(
+      existing.slideNumber, fitted, templateKey, imagesBefore
+    );
+
+    if (pos.ok) {
+      log(`✅ Image remplacée (slide ${existing.slideNumber})`, 'ok');
+      setStatus(`✅ Image remplacée`, 'ok');
+    } else {
+      log(`⚠️ Positionnement échoué : ${pos.reason || pos.error || '?'}`, 'err');
+    }
     return { retry: false };
   }
 
-  /* ───────────── Normal placement ───────────── */
-  if (!scan.slot) {
-    if (CFG.AUTO_DUPLICATE) {
-      log('📑 Slide pleine — duplication automatique…');
-      setStatus('📑 Duplication de la slide…');
-      const dup = await P.duplicateLastSlide();
-      if (dup.ok) {
-        log(`✅ Slide ${dup.slideNumber} dupliquée`, 'ok');
-        scan = await P.scanLast(templateKey);
-      } else {
-        log('⚠️ Duplication échouée : ' + (dup.reason || '?'), 'err');
-      }
-    } else {
-      /* ⭐ 2 images per slide → bring PPT to the front and wait for the
-         user to duplicate; scanLast then clears the copied images. */
-      log('📑 Slide pleine — en attente de la duplication par l\'utilisateur…');
-      setStatus('📑 Slide pleine — dupliquez la slide', 'err');
-      await P.requestPptFocus();
+  /* Normal placement */
+  let slot = await P.findFreeSlot();
+  if (!slot) {
+    log('📑 Toutes les slides sont pleines — duplication automatique…');
+    setStatus('📑 Duplication de la slide…');
 
-      const dupOk = await P.waitForUserDuplicate(scan.slideNumber, scan.slideId);
-      if (!dupOk) {
-        log('Duplication annulée — image GARDÉE (bouton Réessayer)', 'err');
-        setStatus('Image gardée — cliquez Réessayer', 'err');
-        return { retry: false, keep: true };
-      }
-      log('✅ Nouvelle slide détectée', 'ok');
-      scan = await P.scanLast(templateKey);
+    /* ⭐ v6.3 — bring PPT to the front so the user sees the new
+       slide appear, then the image land on it.
+       ⭐ v7.0 — this is also what makes the CDP fast path valid
+       right after: the user is now on PPT. */
+    await P.requestPptFocus();
+
+    const dup = await P.duplicateLastSlide();
+    if (dup.ok) {
+      log(`✅ Slide ${dup.slideNumber} dupliquée`, 'ok');
+      slot = await P.findFreeSlot();
+    } else {
+      log('⚠️ Duplication échouée : ' + (dup.reason || '?'), 'err');
     }
   }
-  if (!scan || !scan.slot) {
+  if (!slot) {
     log('⚠️ Toutes les slides sont pleines', 'err');
     setStatus('⚠️ Slides pleines — dupliquez-en une', 'err');
     return { retry: true };
   }
+  log(`Slot libre : slide ${slot.slideNumber}, ${slot.slot}`);
 
-  const fitted = P.containFit(scan.slot.rect, dims.w, dims.h);
-  log(`Slot : slide ${scan.slideNumber}, ${scan.slot.slot} — fit ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)}`);
+  const fitted = P.containFit(slot.rect, dims.w, dims.h);
+  log(`Fit : ${fitted.w.toFixed(0)}×${fitted.h.toFixed(0)} @ (${fitted.x.toFixed(0)},${fitted.y.toFixed(0)})`);
 
-  const ins = await P.insertViaPaste(base64, scan.slideNumber, fitted, { skipPrep: true });
-  if (!ins || !ins.ok) return { retry: true };   /* queue retries, then keeps the image */
+  await P.focusSlide(slot.slideNumber);
 
-  const pos = await P.positionNewFast(scan.slideId, scan.ids, fitted, templateKey);
-  if (pos.ok) {
-    log(`✅ Image placée (slide ${scan.slideNumber}, ${scan.slot.slot}) — ${Date.now() - t0} ms`, 'ok');
-    P.toast(`✅ Image envoyée (slide ${scan.slideNumber})`);
-    P.state.imagesPlaced = (P.state.imagesPlaced || 0) + 1;
-    setStatus(`✅ Image placée (slide ${scan.slideNumber})`, 'ok');
-  } else {
-    log(`⚠️ Positionnement échoué : ${pos.reason || '?'}`, 'err');
+  const base64 = dataUrl.replace(/^data:image\/\w+;base64,/, '');
+
+  /* ⭐ v7.0 — if the user was brought to PPT by the duplicate-slide
+     flow, or if they are already on PPT for any reason, go
+     straight to CDP. insertViaPaste auto-detects this. */
+  const insertResult = await P.insertViaPaste(base64, slot.slideNumber, fitted);
+
+  if (!insertResult || !insertResult.ok) {
+    return { retry: false };
   }
+
+  /* ⭐ v7.0 — short settle: 300 ms for CDP, 500 ms for Office.js. */
+  const settleMs = insertResult.method === 'cdp' ? 300 : 500;
+  await new Promise((r) => setTimeout(r, settleMs));
+
+  const imagesBefore = insertResult && typeof insertResult.imagesBefore === 'number'
+    ? insertResult.imagesBefore
+    : null;
+
+  const pos = await P.positionNewImage(
+    slot.slideNumber, fitted, templateKey, imagesBefore
+  );
+
+  if (pos.ok) {
+    log(`✅ Image placée (slide ${slot.slideNumber}, ${slot.slot})`, 'ok');
+    P.state.imagesPlaced = (P.state.imagesPlaced || 0) + 1;
+    setStatus(`✅ Image placée (slide ${slot.slideNumber})`, 'ok');
+  } else {
+    log(`⚠️ Positionnement échoué : ${pos.reason || pos.error || '?'}`, 'err');
+  }
+
   return { retry: false };
 };

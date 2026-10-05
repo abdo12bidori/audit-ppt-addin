@@ -44,15 +44,23 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
 
   /* ⭐ v7.0 — decide which path to take */
   const userOnPpt = P._isPptFocused();
-  /* CDP is NEVER the first choice (it can freeze Chrome). It is only the
-     last resort below, after Office.js failed twice. */
-  const skipOfficeJs = P.CFG.PREFER_CDP_ALWAYS === true;
+  const skipOfficeJs =
+    opts.skipOfficeJs === true ||
+    (P.CFG.ALLOW_CDP_FALLBACK && (userOnPpt || P.CFG.PREFER_CDP_ALWAYS));
 
   if (skipOfficeJs) {
     log(`⚡ v7.0 — CDP direct path (userOnPpt=${userOnPpt}, forced=${opts.skipOfficeJs === true})`);
     await P.insertViaCdpPaste(base64);
 
-    /* (toast now sent by process.js once the image is really placed) */
+    /* Notify the extension */
+    try {
+      window.parent.postMessage({
+        type: 'AUDIT_SHOW_TOAST',
+        text: '✅ Image envoyée (CDP rapide)',
+        sourceTabId: sourceTabId,
+        ts: Date.now(),
+      }, '*');
+    } catch (e) {}
 
     return {
       ok: true,
@@ -62,15 +70,17 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
   }
 
   /* ── 1) Try the clean path (Office.js — no focus) ── */
-  let officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted, opts);
-  if (!officeResult || !officeResult.ok) {
-    log('↻ Office.js : 2e tentative…');
-    await new Promise((r) => setTimeout(r, 400));
-    officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted, opts);
-  }
+  const officeResult = await P.insertViaOfficeJs(base64, slideNumber, fitted);
 
   if (officeResult && officeResult.ok) {
-    /* (toast now sent by process.js once the image is really placed) */
+    try {
+      window.parent.postMessage({
+        type: 'AUDIT_SHOW_TOAST',
+        text: '✅ Image insérée dans PowerPoint',
+        sourceTabId: sourceTabId,
+        ts: Date.now(),
+      }, '*');
+    } catch (e) {}
 
     return {
       ok: true,
@@ -93,7 +103,14 @@ window.AuditPlacement.insertViaPaste = async function (base64, slideNumber, fitt
   log('↩️ Fallback CDP (Office.js a échoué)', 'err');
   await P.insertViaCdpPaste(base64);
 
-    /* (toast now sent by process.js once the image is really placed) */
+  try {
+    window.parent.postMessage({
+      type: 'AUDIT_SHOW_TOAST',
+      text: '✅ Image envoyée (méthode CDP)',
+      sourceTabId: sourceTabId,
+      ts: Date.now(),
+    }, '*');
+  } catch (e) {}
 
   /* CDP path doesn't provide a reliable imagesBefore count — the
      canvas-pasted image often appears with a random name. Return
