@@ -42,31 +42,35 @@
   </div>
 
   <button id="reset">Réinitialiser la session</button>
-  <button id="measure">📐 Mesurer les formes</button>
-  <pre id="measure-output"></pre>
+
+  <!-- ⭐ Bouton "Mesurer les formes" CACHÉ (display:none).
+       Le code JS dans taskpane.js reste intact et ne plante pas.
+       Pour le réafficher, enlève simplement style="display:none;". -->
+  <button id="measure" style="display:none;">📐 Mesurer les formes</button>
+  <pre id="measure-output" style="display:none;"></pre>
 
   <div class="log" id="log"></div>
 
   <!-- Templates -->
-  <script src="templates/street.js?v=5"></script>
-  <script src="templates/obione.js?v=5"></script>
-  <script src="templates/onb.js?v=5"></script>
-  <script src="templates/ban.js?v=5"></script>
-  <script src="templates/index.js?v=5"></script>
+  <script src="templates/street.js?v=6"></script>
+  <script src="templates/obione.js?v=6"></script>
+  <script src="templates/onb.js?v=6"></script>
+  <script src="templates/ban.js?v=6"></script>
+  <script src="templates/index.js?v=6"></script>
 
   <!-- Placement modules (order matters) -->
-  <script src="placement/config.js?v=5"></script>
-  <script src="placement/image.js?v=5"></script>
-  <script src="placement/insert.js?v=5"></script>
-  <script src="placement/insert-cdp.js?v=5"></script>
-  <script src="placement/paste.js?v=5"></script>
-  <script src="placement/slots.js?v=5"></script>
-  <script src="placement/position.js?v=5"></script>
+  <script src="placement/config.js?v=6"></script>
+  <script src="placement/image.js?v=6"></script>
+  <script src="placement/insert.js?v=6"></script>
+  <script src="placement/insert-cdp.js?v=6"></script>
+  <script src="placement/paste.js?v=6"></script>
+  <script src="placement/slots.js?v=6"></script>
+  <script src="placement/position.js?v=6"></script>
   <script src="placement/fast.js?v=6"></script>
-  <script src="placement/process.js?v=5"></script>
-  <script src="placement/queue.js?v=5"></script>
+  <script src="placement/process.js?v=6"></script>
+  <script src="placement/queue.js?v=6"></script>
 
   <!-- UI -->
-  <script src="taskpane.js?v=5"></script>
+  <script src="taskpane.js?v=6"></script>
 </body>
 </html>
